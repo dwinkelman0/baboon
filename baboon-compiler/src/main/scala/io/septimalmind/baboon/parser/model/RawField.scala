@@ -1,3 +1,8 @@
 package io.septimalmind.baboon.parser.model
 
-case class RawField(name: RawFieldName, tpe: RawTypeRef, prevName: Option[RawFieldName])
+case class RawField(
+  name: RawFieldName,
+  tpe: RawTypeRef,
+  prevName: Option[RawFieldName],
+  default: Option[RawDefaultValue] = None,
+)

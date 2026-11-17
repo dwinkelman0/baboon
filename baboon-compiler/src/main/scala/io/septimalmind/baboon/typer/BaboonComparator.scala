@@ -834,7 +834,6 @@ object BaboonComparator {
 
         val keptMembers = keptNames.map {
           name =>
-            val oldRef = members1ByName(name)
             val newRef = members2ByName(name)
             // Check modification status based on the new branch ref
             val modification = figureOutModification(changes, Set(newRef))
@@ -938,7 +937,7 @@ object BaboonComparator {
       val keptFields = keptMembers.map(name => (members1(name), members2(name)))
       val changedFields = keptFields.filter {
         case (f1, f2) =>
-          !sameType(f1.tpe, f2.tpe)
+          !sameType(f1.tpe, f2.tpe) || f1.default != f2.default
       }
       val unchangedFields = keptFields.filter {
         case (f1, f2) =>

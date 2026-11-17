@@ -433,6 +433,7 @@ object SwDefnTranslator {
       // heap-backed and break the cycle, so a field like `children: lst[Tree]` is NOT boxed.
       val recursiveFields = recursiveFieldNames(dto)
 
+      // TODO defaults: Field.default ignored in v1
       val fieldDeclarations = dto.fields.map {
         f =>
           val t       = domainTypes.asSwRef(f.tpe)

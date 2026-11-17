@@ -595,6 +595,7 @@ object RsDefnTranslator {
     }
 
     private def makeDtoRepr(dto: Typedef.Dto, name: RsType): TextTree[RsValue] = {
+      // TODO defaults: Field.default ignored in v1
       val fields = dto.fields.map {
         f =>
           val t          = representation.field(f.tpe).stored

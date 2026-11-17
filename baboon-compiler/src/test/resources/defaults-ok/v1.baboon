@@ -1,0 +1,25 @@
+// Field-default emission test model for Python backend.
+//
+// Purpose: exercise @default on every leaf scalar kind plus enum and special
+// floats so the Python emitter's default-value rendering is covered.
+
+model defaults.test
+
+version "1.0.0"
+
+enum Status {
+  Active
+  Inactive
+}
+
+root data Defaults {
+  @default(42)          intField:    i32
+  @default(1.5)         floatField:  f64
+  @default(true)        boolField:   bit
+  @default("hello")     strField:    str
+  @default(null)        optField:    opt[str]
+  @default(Active) enumField: Status
+  @default(nan)         nanField:    f64
+  @default(+inf)        posInfField: f64
+  @default(-inf)        negInfField: f64
+}

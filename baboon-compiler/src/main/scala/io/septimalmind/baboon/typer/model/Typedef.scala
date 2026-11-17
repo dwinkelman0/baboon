@@ -198,9 +198,12 @@ object Docs {
   val empty: Docs = Docs(None, None)
 }
 
-case class Field(name: FieldName, tpe: TypeRef, prevName: Option[FieldName], docs: Docs = Docs.empty) {
-  override def toString: String = prevName match {
-    case Some(prev) => s"$name: $tpe was $prev"
-    case None       => s"$name: $tpe"
+case class Field(name: FieldName, tpe: TypeRef, prevName: Option[FieldName], docs: Docs = Docs.empty, default: Option[FieldDefault] = None) {
+  override def toString: String = {
+    val defaultPart = default.map(d => s" @default($d)").getOrElse("")
+    prevName match {
+      case Some(prev) => s"$name: $tpe$defaultPart was $prev"
+      case None       => s"$name: $tpe$defaultPart"
+    }
   }
 }

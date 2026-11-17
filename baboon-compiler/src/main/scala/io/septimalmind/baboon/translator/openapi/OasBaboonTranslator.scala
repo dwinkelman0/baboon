@@ -148,7 +148,12 @@ class OasBaboonTranslator[F[+_, +_]: Error2](
       val required = fields.filterNot(f => isOptional(f.tpe)).map(f => Json.fromString(f.name.name))
       val properties = fields.map {
         f =>
-          f.name.name -> described(typeTranslator.typeRefSchemaValue(f.tpe, references.enums.keySet), f.docs)
+          val propSchema = described(typeTranslator.typeRefSchemaValue(f.tpe, references.enums.keySet), f.docs)
+          val propWithDefault = f.default.flatMap(typeTranslator.renderJsonDefault) match {
+            case Some(defaultValue) => propSchema.mapObject(_.add("default", defaultValue))
+            case None               => propSchema
+          }
+          f.name.name -> propWithDefault
       }
       val withRequired = if (required.isEmpty) base else base.mapObject(_.add("required", Json.arr(required*)))
       withRequired.mapObject(_.add("properties", Json.obj(properties*)))

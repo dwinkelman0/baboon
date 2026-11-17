@@ -40,6 +40,7 @@ trait Keywords {
   def mirror[$: P]: P[Unit]     = kw("mirror")
   def keep[$: P]: P[Unit]       = kw("keep")
   def drop[$: P]: P[Unit]       = kw("drop")
+  def default[$: P]: P[Unit]    = kw("default")
 
   def apply[T](kw: => P[Unit], defparser: => P[T])(implicit v: P[?]): P[T] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace

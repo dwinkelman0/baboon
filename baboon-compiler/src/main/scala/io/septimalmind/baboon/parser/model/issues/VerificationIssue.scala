@@ -129,6 +129,15 @@ object VerificationIssue {
   // field with the offending `TypeId.User` it resolved to.
   case class DataTypeExpectedField(owner: Typedef.User, badFields: List[(Field, TypeId.User)], meta: RawNodeMeta) extends VerificationIssue
 
+  // v1 field-default validation issues.
+  case class DefaultTypeMismatch(field: Field, expected: TypeRef, got: FieldDefault, meta: RawNodeMeta) extends VerificationIssue
+  case class DefaultOutOfRange(field: Field, value: String, meta: RawNodeMeta) extends VerificationIssue
+  case class DefaultNullOnRequired(field: Field, meta: RawNodeMeta) extends VerificationIssue
+  case class DefaultNotLeaf(field: Field, got: FieldDefault, meta: RawNodeMeta) extends VerificationIssue
+  case class DefaultOnNonData(owner: Typedef.User, fields: List[Field], meta: RawNodeMeta) extends VerificationIssue
+  case class ConflictingDefaults(owner: TypeId.User, fieldName: FieldName, defaults: List[FieldDefault], meta: RawNodeMeta) extends VerificationIssue
+  case class DefaultFnNotSupported(field: Field, meta: RawNodeMeta) extends VerificationIssue
+
   implicit val lockedVersionModifiedPrinter: IssuePrinter[LockedVersionModified] =
     (issue: LockedVersionModified) => {
       s"""Model ${issue.pkg.toString}@${issue.version} was modified but it's not the latest version so it's locked with the lockfile""".stripMargin
@@ -418,6 +427,58 @@ object VerificationIssue {
          |In: ${issue.owner.id.toString}
          |Field(s) reference a contract/service where a data type is expected: $fieldText
          |Contracts and services are not data types — they cannot be used as a field value type. Use a `data`, `adt`, `enum`, or `foreign` type, or inherit the contract via `is`.
+         |""".stripMargin
+    }
+
+  implicit val defaultTypeMismatchPrinter: IssuePrinter[DefaultTypeMismatch] =
+    (issue: DefaultTypeMismatch) => {
+      s"""${extractLocation(issue.meta)}
+         |Field '${issue.field.name.name}' expects type '${issue.expected}' but default value '${issue.got}' does not match.
+         |""".stripMargin
+    }
+
+  implicit val defaultOutOfRangePrinter: IssuePrinter[DefaultOutOfRange] =
+    (issue: DefaultOutOfRange) => {
+      s"""${extractLocation(issue.meta)}
+         |Field '${issue.field.name.name}' has default value '${issue.value}' which is out of range for its type.
+         |""".stripMargin
+    }
+
+  implicit val defaultNullOnRequiredPrinter: IssuePrinter[DefaultNullOnRequired] =
+    (issue: DefaultNullOnRequired) => {
+      s"""${extractLocation(issue.meta)}
+         |Field '${issue.field.name.name}' is non-optional but has default value `null`. Only `opt[_]` fields may default to `null`.
+         |""".stripMargin
+    }
+
+  implicit val defaultNotLeafPrinter: IssuePrinter[DefaultNotLeaf] =
+    (issue: DefaultNotLeaf) => {
+      s"""${extractLocation(issue.meta)}
+         |Field '${issue.field.name.name}' has default value '${issue.got}' but defaults are only supported on leaf scalar and enum fields in this version.
+         |""".stripMargin
+    }
+
+  implicit val defaultOnNonDataPrinter: IssuePrinter[DefaultOnNonData] =
+    (issue: DefaultOnNonData) => {
+      val fieldText = issue.fields.map(_.name.name).mkString(", ")
+      s"""${extractLocation(issue.meta)}
+         |In: ${issue.owner.id.toString}
+         |Field(s) have defaults but defaults are only allowed on plain `data` fields: $fieldText
+         |""".stripMargin
+    }
+
+  implicit val conflictingDefaultsPrinter: IssuePrinter[ConflictingDefaults] =
+    (issue: ConflictingDefaults) => {
+      s"""${extractLocation(issue.meta)}
+         |In: ${issue.owner.toString}
+         |Field '${issue.fieldName.name}' has conflicting defaults from multiple sources: ${issue.defaults.mkString(", ")}
+         |""".stripMargin
+    }
+
+  implicit val defaultFnNotSupportedPrinter: IssuePrinter[DefaultFnNotSupported] =
+    (issue: DefaultFnNotSupported) => {
+      s"""${extractLocation(issue.meta)}
+         |Field '${issue.field.name.name}' uses a function default, which is not supported in this version.
          |""".stripMargin
     }
 

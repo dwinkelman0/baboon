@@ -283,6 +283,7 @@ object ScDefnTranslator {
 
       defn.defn match {
         case dto: Typedef.Dto =>
+          // TODO defaults: Field.default ignored in v1
           val params = dto.fields.map {
             f =>
               val t       = domainTypes.asScRef(f.tpe)
