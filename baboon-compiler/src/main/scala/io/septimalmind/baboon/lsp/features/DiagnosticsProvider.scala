@@ -227,6 +227,20 @@ class DiagnosticsProvider(positionConverter: PositionConverter) {
               case (f, t) => s"${f.name.name} → ${t.name.name}"
             }.mkString(", ")}",
         )
+      case DefaultTypeMismatch(field, expected, got, meta) =>
+        (Some(meta), s"default for field '${field.name.name}' has type mismatch: expected $expected, got $got")
+      case DefaultOutOfRange(field, value, meta) =>
+        (Some(meta), s"default for field '${field.name.name}' is out of range: $value")
+      case DefaultNullOnRequired(field, meta) =>
+        (Some(meta), s"default for required field '${field.name.name}' cannot be null")
+      case DefaultNotLeaf(field, got, meta) =>
+        (Some(meta), s"default for field '${field.name.name}' must be a leaf value, got $got")
+      case DefaultOnNonData(owner, fields, meta) =>
+        (Some(meta), s"defaults are not allowed on non-data type ${owner.id.name.name}: ${fields.map(_.name.name).mkString(", ")}")
+      case ConflictingDefaults(owner, fieldName, defaults, meta) =>
+        (Some(meta), s"conflicting defaults for field '${fieldName.name}' in ${owner.name.name}: ${defaults.mkString(", ")}")
+      case DefaultFnNotSupported(field, meta) =>
+        (Some(meta), s"default function is not supported for field '${field.name.name}'")
       case LockedVersionModified(pkg, version) =>
         (None, s"Locked version modified: $pkg@$version")
       case MissingTypeDef(domain, missing) =>

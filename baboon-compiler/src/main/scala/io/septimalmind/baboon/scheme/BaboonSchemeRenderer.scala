@@ -301,8 +301,9 @@ object BaboonSchemeRenderer {
       sb.append(s"$indent${rootPrefix}data ${dto.id.name.name}$derivations {\n")
       dto.fields.foreach {
         field =>
+          val defaultPrefix = renderDefaultPrefix(field)
           val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
-          sb.append(s"$indent  ${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
+          sb.append(s"$indent  $defaultPrefix${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
       }
       // `dto.fields` already holds each contract's fields where its `is` was declared, and a
       // reload inlines a contract's fields at its `is` and keeps the first copy: written after the
@@ -410,8 +411,9 @@ object BaboonSchemeRenderer {
       }
       contract.fields.foreach {
         field =>
+          val defaultPrefix = renderDefaultPrefix(field)
           val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
-          sb.append(s"$indent  ${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
+          sb.append(s"$indent  $defaultPrefix${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
       }
       sb.append(s"$indent}\n")
     }
@@ -461,8 +463,9 @@ object BaboonSchemeRenderer {
                   sb.append(s"$indent      data $role {\n")
                   dto.fields.foreach {
                     field =>
+                      val defaultPrefix = renderDefaultPrefix(field)
                       val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
-                      sb.append(s"$indent          ${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
+                      sb.append(s"$indent          $defaultPrefix${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
                   }
                   sb.append(s"$indent      }\n")
                 case _ =>
@@ -479,6 +482,10 @@ object BaboonSchemeRenderer {
         case Owner.Ns(path) => path.toSeq == expectedNsPath
         case _              => false
       })
+    }
+
+    private def renderDefaultPrefix(field: Field): String = {
+      field.default.map(d => s"@default($d) ").getOrElse("")
     }
 
     private def renderTypeRef(ref: TypeRef): String = ref match {

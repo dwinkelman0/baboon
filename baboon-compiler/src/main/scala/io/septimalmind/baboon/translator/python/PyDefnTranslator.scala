@@ -547,15 +547,60 @@ object PyDefnTranslator {
           val plan      = PyFieldPlan(field, contractsFields.contains(field))
           val fieldName = plan.wireName
           val fieldType = domainTypes.asPyRef(field.tpe, fileTools.definitionsBasePkg)
+          val defaultValue = field.default.map(renderPyDefault(_, field))
           // A trailing `_` suffix is needed when either the field is a Python keyword (PEP 8
           // convention) or the field implements a contract abstract method (to avoid a Python
           // name-clash with the @property accessor). In both cases a pydantic alias preserves the
           // original model name as the wire key.
-          if (plan.needsAlias) {
-            q"${plan.attributeName}: $fieldType = $pydanticField(alias='$fieldName', serialization_alias='$fieldName')"
-          } else q"${plan.attributeName}: $fieldType"
+          (plan.needsAlias, defaultValue) match {
+            case (true, Some(dv)) =>
+              q"${plan.attributeName}: $fieldType = $pydanticField(default=$dv, alias='$fieldName', serialization_alias='$fieldName')"
+            case (true, None) =>
+              q"${plan.attributeName}: $fieldType = $pydanticField(alias='$fieldName', serialization_alias='$fieldName')"
+            case (false, Some(dv)) =>
+              q"${plan.attributeName}: $fieldType = $dv"
+            case (false, None) =>
+              q"${plan.attributeName}: $fieldType"
+          }
       }
       if (fields.isEmpty) List(q"pass") else fields
+    }
+
+    private def renderPyString(s: String): String = {
+      val escaped = s.flatMap {
+        case '"'  => "\\\""
+        case '\\' => "\\\\"
+        case '\n' => "\\n"
+        case '\r' => "\\r"
+        case '\t' => "\\t"
+        case c    => c.toString
+      }
+      s"\"$escaped\""
+    }
+
+    private def renderPyDefault(fd: FieldDefault, field: Field): TextTree[PyValue] = {
+      fd match {
+        case FieldDefault.IntVal(_, raw, _) =>
+          q"$raw"
+        case FieldDefault.FloatVal(_, raw) =>
+          q"$raw"
+        case FieldDefault.BoolVal(true)  => q"True"
+        case FieldDefault.BoolVal(false) => q"False"
+        case FieldDefault.StrVal(value) =>
+          q"${renderPyString(value)}"
+        case FieldDefault.NullVal =>
+          q"None"
+        case FieldDefault.EnumVal(memberName) =>
+          val enumTpe     = domainTypes.asPyType(field.tpe.id, fileTools.definitionsBasePkg)
+          val memberIdent = escapePyKeyword(memberName.split('.').last)
+          q"$enumTpe.$memberIdent"
+        case FieldDefault.SpecialFloatVal(kind) =>
+          kind match {
+            case FieldDefault.SpecialFloatKind.NaN    => q"float('nan')"
+            case FieldDefault.SpecialFloatKind.PosInf => q"float('inf')"
+            case FieldDefault.SpecialFloatKind.NegInf => q"float('-inf')"
+          }
+      }
     }
 
     private def genDtoProperties(contractsFields: List[Field]): Option[List[TextTree[PyValue]]] = {

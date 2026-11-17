@@ -60,6 +60,7 @@ object BaboonValidator {
         _ <- checkPathologicGenerics(domain)
         _ <- checkAnyFields(domain)
         _ <- checkIdentifierFields(domain)
+        _ <- checkDefaults(domain)
         _ <- checkDataTypeFields(domain)
         _ <- checkUserMapKeysEligibility(domain)
         _ <- checkRoots(domain)
@@ -125,6 +126,198 @@ object BaboonValidator {
     //   (4) User-defined types that are not themselves `id` DTOs are rejected
     //       → IdentifierFieldUserNotIdentifier.
     //   All other scalars (bit, i08…u64, str, uid, tsu, tso, bytes, nested `id`) are accepted.
+    private def checkDefaults(
+      domain: Domain
+    ): F[NEList[BaboonIssue], Unit] = {
+      F.traverseAccumErrors_(domain.defs.meta.nodes.values) {
+        case _: DomainMember.Builtin =>
+          F.unit
+        case u: DomainMember.User =>
+          u.defn match {
+            case d: Typedef.Dto if !d.isIdentifier =>
+              F.traverseAccumErrors_(d.fields)(checkFieldDefault(domain, u.meta, _))
+            case d: Typedef.Dto if d.isIdentifier =>
+              val bad = d.fields.filter(_.default.isDefined)
+              F.when(bad.nonEmpty)(
+                F.fail(BaboonIssue.of(VerificationIssue.DefaultOnNonData(d, bad, u.meta)))
+              )
+            case c: Typedef.Contract =>
+              val bad = c.fields.filter(_.default.isDefined)
+              F.when(bad.nonEmpty)(
+                F.fail(BaboonIssue.of(VerificationIssue.DefaultOnNonData(c, bad, u.meta)))
+              )
+            case a: Typedef.Adt =>
+              val bad = a.fields.filter(_.default.isDefined)
+              F.when(bad.nonEmpty)(
+                F.fail(BaboonIssue.of(VerificationIssue.DefaultOnNonData(a, bad, u.meta)))
+              )
+            case _ =>
+              F.unit
+          }
+      }
+    }
+
+    private def checkFieldDefault(
+      domain: Domain,
+      meta: RawNodeMeta,
+      field: Field,
+    ): F[NEList[BaboonIssue], Unit] = {
+      field.default match {
+        case None =>
+          F.unit
+        case Some(default) =>
+          validateDefault(domain, field, default, meta)
+      }
+    }
+
+    private def validateDefault(
+      domain: Domain,
+      field: Field,
+      default: FieldDefault,
+      meta: RawNodeMeta,
+    ): F[NEList[BaboonIssue], Unit] = {
+      import TypeId.Builtins
+
+      if (default == FieldDefault.NullVal && !field.tpe.isInstanceOf[TypeRef.Constructor]) {
+        return F.fail(BaboonIssue.of(VerificationIssue.DefaultNullOnRequired(field, meta)))
+      }
+
+      field.tpe match {
+        case TypeRef.Constructor(Builtins.opt, _) =>
+          default match {
+            case FieldDefault.NullVal => F.unit
+            case _ =>
+              F.fail(BaboonIssue.of(VerificationIssue.DefaultTypeMismatch(field, field.tpe, default, meta)))
+          }
+
+        case TypeRef.Scalar(id: TypeId.User) =>
+          domain.defs.meta.nodes.get(id) match {
+            case Some(DomainMember.User(_, _: Typedef.Enum, _, _)) =>
+              default match {
+                case FieldDefault.EnumVal(member) =>
+                  val enumDef = domain.defs.meta.nodes(id).asInstanceOf[DomainMember.User].defn.asInstanceOf[Typedef.Enum]
+                  val exists = enumDef.members.toList.exists(_.name == member)
+                  F.when(!exists)(
+                    F.fail(BaboonIssue.of(VerificationIssue.DefaultTypeMismatch(field, field.tpe, default, meta)))
+                  )
+                case _ =>
+                  F.fail(BaboonIssue.of(VerificationIssue.DefaultTypeMismatch(field, field.tpe, default, meta)))
+              }
+            case _ =>
+              F.fail(BaboonIssue.of(VerificationIssue.DefaultNotLeaf(field, default, meta)))
+          }
+
+        case TypeRef.Scalar(b: TypeId.BuiltinScalar) =>
+          validateBuiltinDefault(field, b, default, meta)
+
+        case _ =>
+          F.fail(BaboonIssue.of(VerificationIssue.DefaultNotLeaf(field, default, meta)))
+      }
+    }
+
+    private def validateBuiltinDefault(
+      field: Field,
+      b: TypeId.BuiltinScalar,
+      default: FieldDefault,
+      meta: RawNodeMeta,
+    ): F[NEList[BaboonIssue], Unit] = {
+      import TypeId.Builtins
+
+      def mismatch: F[NEList[BaboonIssue], Unit] =
+        F.fail(BaboonIssue.of(VerificationIssue.DefaultTypeMismatch(field, field.tpe, default, meta)))
+
+      b match {
+        case Builtins.bit =>
+          default match {
+            case FieldDefault.BoolVal(_) => F.unit
+            case _                       => mismatch
+          }
+
+        case Builtins.str =>
+          default match {
+            case FieldDefault.StrVal(_) => F.unit
+            case _                      => mismatch
+          }
+
+        case Builtins.i08 =>
+          default match {
+            case v: FieldDefault.IntVal => checkSignedRange(field, v, Byte.MinValue.toLong, Byte.MaxValue.toLong, meta)
+            case _                      => mismatch
+          }
+        case Builtins.i16 =>
+          default match {
+            case v: FieldDefault.IntVal => checkSignedRange(field, v, Short.MinValue.toLong, Short.MaxValue.toLong, meta)
+            case _                      => mismatch
+          }
+        case Builtins.i32 =>
+          default match {
+            case v: FieldDefault.IntVal => checkSignedRange(field, v, Int.MinValue.toLong, Int.MaxValue.toLong, meta)
+            case _                      => mismatch
+          }
+        case Builtins.i64 =>
+          default match {
+            case _: FieldDefault.IntVal => F.unit
+            case _                      => mismatch
+          }
+
+        case Builtins.u08 =>
+          default match {
+            case v: FieldDefault.IntVal => checkUnsignedRange(field, v, 0xffL, meta)
+            case _                      => mismatch
+          }
+        case Builtins.u16 =>
+          default match {
+            case v: FieldDefault.IntVal => checkUnsignedRange(field, v, 0xffffL, meta)
+            case _                      => mismatch
+          }
+        case Builtins.u32 =>
+          default match {
+            case v: FieldDefault.IntVal => checkUnsignedRange(field, v, 0xffffffffL, meta)
+            case _                      => mismatch
+          }
+        case Builtins.u64 =>
+          default match {
+            case v: FieldDefault.IntVal if v.value >= 0 => F.unit
+            case _                                      => mismatch
+          }
+
+        case Builtins.f32 | Builtins.f64 | Builtins.f128 =>
+          default match {
+            case _: FieldDefault.IntVal | _: FieldDefault.FloatVal | _: FieldDefault.SpecialFloatVal => F.unit
+            case _                                                                                    => mismatch
+          }
+
+        case Builtins.uid | Builtins.tsu | Builtins.tso | Builtins.bytes =>
+          mismatch
+
+        case _ =>
+          mismatch
+      }
+    }
+
+    private def checkSignedRange(
+      field: Field,
+      v: FieldDefault.IntVal,
+      min: Long,
+      max: Long,
+      meta: RawNodeMeta,
+    ): F[NEList[BaboonIssue], Unit] = {
+      F.when(v.value < min || v.value > max)(
+        F.fail(BaboonIssue.of(VerificationIssue.DefaultOutOfRange(field, v.raw, meta)))
+      )
+    }
+
+    private def checkUnsignedRange(
+      field: Field,
+      v: FieldDefault.IntVal,
+      max: Long,
+      meta: RawNodeMeta,
+    ): F[NEList[BaboonIssue], Unit] = {
+      F.when(v.value < 0 || v.value > max)(
+        F.fail(BaboonIssue.of(VerificationIssue.DefaultOutOfRange(field, v.raw, meta)))
+      )
+    }
+
     private def checkIdentifierFields(
       domain: Domain
     ): F[NEList[BaboonIssue], Unit] = {
@@ -153,7 +346,7 @@ object BaboonValidator {
               }
               val anyFields = d.fields.filter(f => f.tpe.isInstanceOf[TypeRef.Any])
               val userNotIdFields: List[(Field, TypeId)] = d.fields.collect {
-                case f @ Field(_, TypeRef.Scalar(uid: TypeId.User), _, _) if !isIdentifierDto(uid) =>
+                case f @ Field(_, TypeRef.Scalar(uid: TypeId.User), _, _, _) if !isIdentifierDto(uid) =>
                   (f, uid: TypeId)
               }
 

@@ -207,7 +207,15 @@ class McpInputSchemaEmitter(typeTranslator: OasTypeTranslator) {
       Json.obj()
     } else {
       val required  = dto.fields.filterNot(f => isOptional(f.tpe)).map(f => Json.fromString(f.name.name))
-      val props     = dto.fields.map(f => f.name.name -> described(fieldSchema(f.tpe, ctx), f.docs))
+      val props = dto.fields.map {
+        f =>
+          val propSchema = described(fieldSchema(f.tpe, ctx), f.docs)
+          val propWithDefault = f.default.flatMap(typeTranslator.renderJsonDefault) match {
+            case Some(defaultValue) => propSchema.mapObject(_.add("default", defaultValue))
+            case None               => propSchema
+          }
+          f.name.name -> propWithDefault
+      }
       val withProps = Json.obj(propertiesKeyword -> Json.obj(props*))
       if (required.isEmpty) withProps
       else mergeObjects(withProps, Json.obj(requiredKeyword -> Json.arr(required*)))

@@ -108,6 +108,7 @@ object BaboonRules {
                 F.pure(NonDataTypeTypeNoConversion(id))
 
               case _: Typedef.Dto =>
+                val targetDto = last.defs.meta.nodes(targetTpe).asInstanceOf[DomainMember.User].defn.asInstanceOf[Typedef.Dto]
                 assert(shallowChanged || isRenamed)
                 for {
                   ops <- diff.diffs.get(id) match {
@@ -132,11 +133,15 @@ object BaboonRules {
                     case op: DtoOp.RemoveField => op.f
                   }.toSet
 
+                  // Scalar additions are normally breaking (old data has no value). If the new
+                  // field carries a user-supplied `@default`, the addition is non-breaking and is
+                  // realised as `InitializeWithDefault`. Collection additions remain non-breaking
+                  // when the collection type has a built-in empty default.
                   incompatibleAdditions = additions.filter {
                     op =>
                       op.f.tpe match {
                         case _: TypeRef.Scalar =>
-                          true
+                          op.f.default.isEmpty
                         case c: TypeRef.Constructor =>
                           !types.hasDefaultValue(c)
                         case _: TypeRef.Any => AnyPlaceholder.notSupportedYet("BaboonRules.incompatibleAdditions")
@@ -144,10 +149,12 @@ object BaboonRules {
                   }
                   compatibleAdditions = additions.diff(incompatibleAdditions)
                   changes             = ops.collect { case op: DtoOp.ChangeField => op }.toSet
+                  // Changing or removing a `@default` on an existing field is a non-breaking
+                  // metadata change for v1: it still appears as a `ChangeField` diff op, but the
+                  // conversion treats it as a transfer because the wire type is unchanged.
                   incompatibleChanges = changes.filter {
                     op =>
-                      assert(op.f.tpe != op.newType)
-                      !types.isCompatibleChange(op.f.tpe, op.newType)
+                      op.f.tpe != op.newType && !types.isCompatibleChange(op.f.tpe, op.newType)
                   }
                   initWithDefaults = compatibleAdditions.map(a => FieldOp.InitializeWithDefault(a.f))
 
@@ -186,6 +193,12 @@ object BaboonRules {
 
                   keepFields = ops.collect {
                     case op: DtoOp.KeepField => FieldOp.Transfer(op.f, op.sourceTpe)
+                  }
+
+                  defaultOnlyTransfers = changes.collect {
+                    case op if op.f.tpe == op.newType =>
+                      val newField = targetDto.fields.find(_.name == op.f.name).getOrElse(op.f)
+                      FieldOp.Transfer(newField, op.newType)
                   }
 
                   renames = ops.collect { case op: DtoOp.RenameField => op }.toSet
@@ -251,7 +264,7 @@ object BaboonRules {
                   } else {
                     DtoConversion(
                       id,
-                      keepFields ++ pureRenameOps.toList ++ redefOps.toList ++ (wrap ++ precex ++ swap ++ initWithDefaults).toList,
+                      keepFields ++ defaultOnlyTransfers ++ pureRenameOps.toList ++ redefOps.toList ++ (wrap ++ precex ++ swap ++ initWithDefaults).toList,
                       removals,
                       targetTpe,
                     )

@@ -330,7 +330,13 @@ object TsDefnTranslator {
       // RHS reference must agree. The private field (`_${name}`) and all object-literal/member-access wire
       // keys keep the raw name, so the wire format is unchanged.
       val constrcutorParams =
-        dto.fields.map(f => q"${typeTranslator.escapeTsKeyword(f.name.name)}: ${domainTypes.asTsRef(f.tpe, tsFileTools.definitionsBasePkg)}").join(", ")
+        dto.fields.map {
+          f =>
+            val paramName = typeTranslator.escapeTsKeyword(f.name.name)
+            val paramType = domainTypes.asTsRef(f.tpe, tsFileTools.definitionsBasePkg)
+            val defaultInit = f.default.map(d => q" = ${renderTsDefault(d, f)}").getOrElse(q"")
+            q"$paramName: $paramType$defaultInit"
+        }.join(", ")
 
       val constructorInside = fieldsNameAndType.map {
         case (n, _) =>
@@ -876,6 +882,43 @@ object TsDefnTranslator {
          |        ${body.shift(8).trim}
          |    },
          |} as const;""".stripMargin
+    }
+
+    private def renderTsString(s: String): String = {
+      val escaped = s.flatMap {
+        case '"'  => "\\\""
+        case '\\' => "\\\\"
+        case '\n' => "\\n"
+        case '\r' => "\\r"
+        case '\t' => "\\t"
+        case c    => c.toString
+      }
+      s"\"$escaped\""
+    }
+
+    private def renderTsDefault(fd: FieldDefault, field: Field): TextTree[TsValue] = {
+      fd match {
+        case FieldDefault.IntVal(_, raw, _) =>
+          q"$raw"
+        case FieldDefault.FloatVal(_, raw) =>
+          q"$raw"
+        case FieldDefault.BoolVal(true)  => q"true"
+        case FieldDefault.BoolVal(false) => q"false"
+        case FieldDefault.StrVal(value) =>
+          q"${renderTsString(value)}"
+        case FieldDefault.NullVal =>
+          q"null"
+        case FieldDefault.EnumVal(memberName) =>
+          val enumTpe     = domainTypes.asTsType(field.tpe.id, tsFileTools.definitionsBasePkg)
+          val memberIdent = typeTranslator.escapeTsKeyword(memberName.split('.').last)
+          q"$enumTpe.$memberIdent"
+        case FieldDefault.SpecialFloatVal(kind) =>
+          kind match {
+            case FieldDefault.SpecialFloatKind.NaN    => q"NaN"
+            case FieldDefault.SpecialFloatKind.PosInf => q"Infinity"
+            case FieldDefault.SpecialFloatKind.NegInf => q"-Infinity"
+          }
+      }
     }
 
     private def getOutputPath(defn: DomainMember.User, suffix: Option[String] = None): String = {

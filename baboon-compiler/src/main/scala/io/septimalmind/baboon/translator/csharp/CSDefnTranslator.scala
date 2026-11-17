@@ -321,6 +321,7 @@ object CSDefnTranslator {
           )
 
         case dto: Typedef.Dto =>
+          // TODO defaults: Field.default ignored in v1
           val outs = dto.fields.map {
             f =>
               val tpe   = domainTypes.asCsRef(f.tpe)

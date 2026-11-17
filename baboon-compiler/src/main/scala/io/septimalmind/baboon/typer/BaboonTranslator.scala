@@ -1,7 +1,7 @@
 package io.septimalmind.baboon.typer
 
 import io.septimalmind.baboon.parser.model.*
-import io.septimalmind.baboon.parser.model.issues.{BaboonIssue, TyperIssue}
+import io.septimalmind.baboon.parser.model.issues.{BaboonIssue, TyperIssue, VerificationIssue}
 import io.septimalmind.baboon.typer.model.*
 import io.septimalmind.baboon.typer.model.Scope.NestedScope
 import io.septimalmind.baboon.typer.model.TypeRef.AnyVariant
@@ -165,8 +165,34 @@ class BaboonTranslator[F[+_, +_]: Error2](
       // (spec §3.1, §3.3). Empty/whitespace-only bodies are silently
       // dropped inside `DocFormat.liftDocs` per spec §5.4.
       docs = DocFormat.liftDocs(meta.docs)
+      fdefault = field.default.map(convertDefault(tpe, _))
     } yield {
-      Seq(Field(name, tpe, prevName, docs))
+      Seq(Field(name, tpe, prevName, docs, fdefault))
+    }
+  }
+
+  private def convertDefault(
+    tpe: TypeRef,
+    raw: RawDefaultValue,
+  ): FieldDefault = {
+    val targetType = tpe match {
+      case TypeRef.Scalar(b: TypeId.BuiltinScalar) => b
+      case _                                       => TypeId.Builtins.i32
+    }
+    raw match {
+      case RawDefaultValue.IntLit(value, r)    => FieldDefault.IntVal(value, r, targetType)
+      case RawDefaultValue.FloatLit(value, r)  => FieldDefault.FloatVal(value, r)
+      case RawDefaultValue.BoolLit(value)      => FieldDefault.BoolVal(value)
+      case RawDefaultValue.StrLit(value)       => FieldDefault.StrVal(value)
+      case RawDefaultValue.NullLit             => FieldDefault.NullVal
+      case RawDefaultValue.EnumRef(value)      => FieldDefault.EnumVal(value)
+      case v: RawDefaultValue.SpecialFloat     =>
+        val kind = v match {
+          case RawDefaultValue.SpecialFloat.NaN    => FieldDefault.SpecialFloatKind.NaN
+          case RawDefaultValue.SpecialFloat.PosInf => FieldDefault.SpecialFloatKind.PosInf
+          case RawDefaultValue.SpecialFloat.NegInf => FieldDefault.SpecialFloatKind.NegInf
+        }
+        FieldDefault.SpecialFloatVal(kind)
     }
   }
 
@@ -368,6 +394,8 @@ class BaboonTranslator[F[+_, +_]: Error2](
           withoutRemoved.filter(f => intersectionSet.contains(f))
         }
 
+      mergedFields <- mergeFieldDefaults(id, finalFields, dto.meta)
+
       missingIrremovable = contractFields.distinct.diff(withoutRemoved.distinct)
       _ <- dto match {
         case _: RawDto | _: RawIdentifier =>
@@ -379,7 +407,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
       }
 
       _ <- F.fromEither {
-        finalFields
+        mergedFields
           .map(m => (m.name.name.toLowerCase, m))
           .toUniqueMap(e => BaboonIssue.of(TyperIssue.NonUniqueFields(id, e, dto.meta)))
       }
@@ -393,10 +421,63 @@ class BaboonTranslator[F[+_, +_]: Error2](
 
       DomainMember.User(
         isRoot,
-        produce(id, finalFields, contractRefs),
+        produce(id, mergedFields, contractRefs),
         decls,
         dto.meta,
       )
+    }
+  }
+
+  private def mergeFieldDefaults(
+    id: TypeId.User,
+    fields: List[Field],
+    meta: RawNodeMeta,
+  ): F[NEList[BaboonIssue], List[Field]] = {
+    val order = fields.map(_.name.name.toLowerCase).distinct
+    val grouped = fields.groupBy(_.name.name.toLowerCase)
+
+    val merged = order.flatMap {
+      lcName =>
+        grouped.get(lcName).toList.flatMap {
+          group =>
+            val representative = group.head
+            val distinctDefaults = group.map(_.default).distinct
+            distinctDefaults match {
+              case List(None)        => List(representative.copy(default = None))
+              case List(Some(d))     => List(representative.copy(default = Some(d)))
+              case _                 =>
+                val nonEmpty = distinctDefaults.collect { case Some(d) => d }.distinct
+                if (nonEmpty.size == 1) {
+                  List(representative.copy(default = Some(nonEmpty.head)))
+                } else {
+                  List.empty
+                }
+            }
+        }
+    }
+
+    val conflicts = order.flatMap {
+      lcName =>
+        grouped.get(lcName).toList.flatMap {
+          group =>
+            val distinctDefaults = group.map(_.default).distinct
+            val nonEmpty = distinctDefaults.collect { case Some(d) => d }.distinct
+            if (nonEmpty.size > 1) {
+              List((group.head.name, nonEmpty))
+            } else {
+              List.empty
+            }
+        }
+    }
+
+    if (conflicts.nonEmpty) {
+      val issues = conflicts.map {
+        case (name, defs) =>
+          BaboonIssue.of(VerificationIssue.ConflictingDefaults(id, name, defs, meta))
+      }
+      F.fail(NEList.unsafeFrom(issues.flatten))
+    } else {
+      F.pure(merged)
     }
   }
 

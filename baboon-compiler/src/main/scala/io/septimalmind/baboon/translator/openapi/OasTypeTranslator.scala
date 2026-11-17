@@ -190,6 +190,22 @@ class OasTypeTranslator {
     Json.obj(parts*)
   }
 
+  /** Render a `FieldDefault` as a JSON value suitable for a JSON Schema `default`
+    * keyword. Returns `None` for `null` defaults and special floats — those are
+    * either already implied by optionality or not representable in plain JSON.
+    */
+  def renderJsonDefault(fd: FieldDefault): Option[Json] = {
+    fd match {
+      case FieldDefault.IntVal(value, _, _)    => Some(Json.fromLong(value))
+      case FieldDefault.FloatVal(value, _)     => Json.fromDouble(value)
+      case FieldDefault.BoolVal(value)         => Some(Json.fromBoolean(value))
+      case FieldDefault.StrVal(value)          => Some(Json.fromString(value))
+      case FieldDefault.EnumVal(memberName)    => Some(Json.fromString(memberName))
+      case FieldDefault.NullVal                => None
+      case FieldDefault.SpecialFloatVal(_)     => None
+    }
+  }
+
   def componentRef(id: TypeId.User): Json = Json.obj("$ref" -> Json.fromString(s"#/components/schemas/${schemaName(id)}"))
 
   /** Generate the schema name for a user-defined type, following the same

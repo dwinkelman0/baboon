@@ -2,9 +2,9 @@ package io.septimalmind.baboon.parser.defns
 
 import fastparse.*
 import io.septimalmind.baboon.parser.{ParserContext, model}
-import io.septimalmind.baboon.parser.defns.base.{DefDocs, idt, kw, struct}
+import io.septimalmind.baboon.parser.defns.base.{DefDocs, Literals, idt, kw, struct}
 import io.septimalmind.baboon.parser.model.RawDtoMember.ContractRef
-import io.septimalmind.baboon.parser.model.{ExtractionKind, RawContractRef, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawIdentifier, RawTypeName, RawTypeRef, ScopedRef}
+import io.septimalmind.baboon.parser.model.{ExtractionKind, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawIdentifier, RawTypeName, RawTypeRef, ScopedRef}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.language.Quirks.Discarder
 
@@ -108,9 +108,59 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
     kw.was ~ fieldName
   }
 
+  private def defaultAnnotation[$: P]: P[RawDefaultValue] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    "@" ~ kw.default ~ "(" ~ defaultArg ~ ")"
+  }
+
+  private def defaultArg[$: P]: P[RawDefaultValue] = {
+    P(specialFloat | strLit | boolLit | nullLit | floatLit | intLit | enumIdent)
+  }
+
+  private def specialFloat[$: P]: P[RawDefaultValue.SpecialFloat] = {
+    (kw.kw("nan").map(_ => RawDefaultValue.SpecialFloat.NaN: RawDefaultValue.SpecialFloat) |
+      kw.kw("+inf").map(_ => RawDefaultValue.SpecialFloat.PosInf: RawDefaultValue.SpecialFloat) |
+      kw.kw("-inf").map(_ => RawDefaultValue.SpecialFloat.NegInf: RawDefaultValue.SpecialFloat))
+  }
+
+  private def boolLit[$: P]: P[RawDefaultValue.BoolLit] = {
+    (kw.kw("true").map(_ => RawDefaultValue.BoolLit(true)) |
+      kw.kw("false").map(_ => RawDefaultValue.BoolLit(false)))
+  }
+
+  private def nullLit[$: P]: P[RawDefaultValue.NullLit.type] = {
+    kw.kw("null").map(_ => RawDefaultValue.NullLit)
+  }
+
+  private def strLit[$: P]: P[RawDefaultValue.StrLit] = {
+    Literals.Literals.Str.map(RawDefaultValue.StrLit.apply)
+  }
+
+  private def floatLit[$: P]: P[RawDefaultValue.FloatLit] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    P(("-" | "+").?.! ~ Literals.Literals.Float.!).map { case (sign, raw) =>
+      val fullRaw = sign + raw
+      RawDefaultValue.FloatLit(fullRaw.toDouble, fullRaw)
+    }
+  }
+
+  private def intLit[$: P]: P[RawDefaultValue.IntLit] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    P(("-" | "+").?.! ~ Literals.Literals.Int.!).map { case (sign, raw) =>
+      val fullRaw = sign + raw
+      RawDefaultValue.IntLit(fullRaw.toLong, fullRaw)
+    }
+  }
+
+  private def enumIdent[$: P]: P[RawDefaultValue.EnumRef] = {
+    idt.symbolSeq.map(seq => RawDefaultValue.EnumRef(seq.mkString(".")))
+  }
+
   def fieldDef[$: P]: P[RawField] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    (fieldName ~ ":" ~ typeRef ~ fieldWas.?).map { case (n, t, prev) => model.RawField(n, t, prev) }
+    (defaultAnnotation.? ~ fieldName ~ ":" ~ typeRef ~ fieldWas.?).map { case (d, n, t, prev) =>
+      model.RawField(n, t, prev, d)
+    }
   }
 
   // NOTE: BaboonWhitespace (imported below) consumes newlines, so `nonGenericTypeRef ~ typeParams.?`
@@ -134,7 +184,7 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   def unfieldDef[$: P]: P[RawField] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    "-" ~ fieldDef
+    "-" ~ fieldDef.map(f => f.copy(default = None))
   }
 
   /** Parses `has (mirror | contract) <bare-identifier>` (T37).

@@ -264,6 +264,7 @@ object KtDefnTranslator {
       defn.defn match {
         case dto: Typedef.Dto =>
           val contractFieldNames = collectContractFieldNames(dto.contracts)
+          // TODO defaults: Field.default ignored in v1
           val params = dto.fields.map {
             f =>
               val t         = domainTypes.asKtNullableRef(f.tpe)
