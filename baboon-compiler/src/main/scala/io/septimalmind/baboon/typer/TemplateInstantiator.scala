@@ -1156,6 +1156,10 @@ object TemplateInstantiator {
           substituteTypeRef(field.tpe, substMap, templateName, registry, fm, pkg).map {
             newTpe => f.copy(field = field.copy(tpe = newTpe))
           }
+        case p @ RawDtoMember.FnProperty(field, fm) =>
+          substituteTypeRef(field.tpe, substMap, templateName, registry, fm, pkg).map {
+            newTpe => p.copy(field = field.copy(tpe = newTpe))
+          }
         case u @ RawDtoMember.UnfieldDef(field, fm) =>
           substituteTypeRef(field.tpe, substMap, templateName, registry, fm, pkg).map {
             newTpe => u.copy(field = field.copy(tpe = newTpe))

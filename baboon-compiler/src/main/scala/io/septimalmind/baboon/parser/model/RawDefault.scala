@@ -9,6 +9,7 @@ object RawDefaultValue {
   final case class StrLit(value: String) extends RawDefaultValue
   case object NullLit extends RawDefaultValue
   final case class EnumRef(value: String) extends RawDefaultValue
+  final case class Fn(fn: RawFn) extends RawDefaultValue
 
   sealed trait SpecialFloat extends RawDefaultValue
   object SpecialFloat {

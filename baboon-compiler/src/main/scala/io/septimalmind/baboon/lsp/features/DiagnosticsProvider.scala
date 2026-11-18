@@ -241,6 +241,8 @@ class DiagnosticsProvider(positionConverter: PositionConverter) {
         (Some(meta), s"conflicting defaults for field '${fieldName.name}' in ${owner.name.name}: ${defaults.mkString(", ")}")
       case DefaultFnNotSupported(field, meta) =>
         (Some(meta), s"default function is not supported for field '${field.name.name}'")
+      case FnNotSupported(owner, feature, meta) =>
+        (Some(meta), s"function syntax is not supported for $feature in ${owner.name.name}")
       case LockedVersionModified(pkg, version) =>
         (None, s"Locked version modified: $pkg@$version")
       case MissingTypeDef(domain, missing) =>

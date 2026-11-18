@@ -137,6 +137,7 @@ object VerificationIssue {
   case class DefaultOnNonData(owner: Typedef.User, fields: List[Field], meta: RawNodeMeta) extends VerificationIssue
   case class ConflictingDefaults(owner: TypeId.User, fieldName: FieldName, defaults: List[FieldDefault], meta: RawNodeMeta) extends VerificationIssue
   case class DefaultFnNotSupported(field: Field, meta: RawNodeMeta) extends VerificationIssue
+  case class FnNotSupported(owner: TypeId.User, feature: String, meta: RawNodeMeta) extends VerificationIssue
 
   implicit val lockedVersionModifiedPrinter: IssuePrinter[LockedVersionModified] =
     (issue: LockedVersionModified) => {
@@ -479,6 +480,14 @@ object VerificationIssue {
     (issue: DefaultFnNotSupported) => {
       s"""${extractLocation(issue.meta)}
          |Field '${issue.field.name.name}' uses a function default, which is not supported in this version.
+         |""".stripMargin
+    }
+
+  implicit val fnNotSupportedPrinter: IssuePrinter[FnNotSupported] =
+    (issue: FnNotSupported) => {
+      s"""${extractLocation(issue.meta)}
+         |In: ${issue.owner.toString}
+         |${issue.feature} is not supported in this version.
          |""".stripMargin
     }
 

@@ -151,6 +151,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
   }
 
   private def dtoFieldToDefs(
+    owner: TypeId.User,
     field: RawField,
     meta: RawNodeMeta,
   ): F[NEList[BaboonIssue], Seq[Field]] = {
@@ -165,7 +166,15 @@ class BaboonTranslator[F[+_, +_]: Error2](
       // (spec §3.1, §3.3). Empty/whitespace-only bodies are silently
       // dropped inside `DocFormat.liftDocs` per spec §5.4.
       docs = DocFormat.liftDocs(meta.docs)
-      fdefault = field.default.map(convertDefault(tpe, _))
+      fdefault <- field.default match {
+        case Some(d) => convertDefault(tpe, d, meta).map(Some(_))
+        case None    => F.pure(None)
+      }
+      _ <- (field.normalize, field.migrate) match {
+        case (None, None) => F.unit
+        case _ =>
+          F.fail(BaboonIssue.of(VerificationIssue.FnNotSupported(owner, "field-level @normalize/@migrate", meta)))
+      }
     } yield {
       Seq(Field(name, tpe, prevName, docs, fdefault))
     }
@@ -174,25 +183,28 @@ class BaboonTranslator[F[+_, +_]: Error2](
   private def convertDefault(
     tpe: TypeRef,
     raw: RawDefaultValue,
-  ): FieldDefault = {
+    meta: RawNodeMeta,
+  ): F[NEList[BaboonIssue], FieldDefault] = {
     val targetType = tpe match {
       case TypeRef.Scalar(b: TypeId.BuiltinScalar) => b
       case _                                       => TypeId.Builtins.i32
     }
     raw match {
-      case RawDefaultValue.IntLit(value, r)    => FieldDefault.IntVal(value, r, targetType)
-      case RawDefaultValue.FloatLit(value, r)  => FieldDefault.FloatVal(value, r)
-      case RawDefaultValue.BoolLit(value)      => FieldDefault.BoolVal(value)
-      case RawDefaultValue.StrLit(value)       => FieldDefault.StrVal(value)
-      case RawDefaultValue.NullLit             => FieldDefault.NullVal
-      case RawDefaultValue.EnumRef(value)      => FieldDefault.EnumVal(value)
+      case RawDefaultValue.IntLit(value, r)    => F.pure(FieldDefault.IntVal(value, r, targetType))
+      case RawDefaultValue.FloatLit(value, r)  => F.pure(FieldDefault.FloatVal(value, r))
+      case RawDefaultValue.BoolLit(value)      => F.pure(FieldDefault.BoolVal(value))
+      case RawDefaultValue.StrLit(value)       => F.pure(FieldDefault.StrVal(value))
+      case RawDefaultValue.NullLit             => F.pure(FieldDefault.NullVal)
+      case RawDefaultValue.EnumRef(value)      => F.pure(FieldDefault.EnumVal(value))
       case v: RawDefaultValue.SpecialFloat     =>
         val kind = v match {
           case RawDefaultValue.SpecialFloat.NaN    => FieldDefault.SpecialFloatKind.NaN
           case RawDefaultValue.SpecialFloat.PosInf => FieldDefault.SpecialFloatKind.PosInf
           case RawDefaultValue.SpecialFloat.NegInf => FieldDefault.SpecialFloatKind.NegInf
         }
-        FieldDefault.SpecialFloatVal(kind)
+        F.pure(FieldDefault.SpecialFloatVal(kind))
+      case RawDefaultValue.Fn(_) =>
+        F.fail(BaboonIssue.of(VerificationIssue.DefaultFnNotSupported(Field(FieldName("<fn>"), tpe, None, DocFormat.liftDocs(meta.docs), None), meta)))
     }
   }
 
@@ -265,13 +277,15 @@ class BaboonTranslator[F[+_, +_]: Error2](
               F.pure(List.empty)
           }
         case f: RawDtoMember.FieldDef =>
-          dtoFieldToDefs(f.field, f.meta)
+          dtoFieldToDefs(id, f.field, f.meta)
         case f: RawDtoMember.TemplateArmFieldDef =>
           // PR-33.9 [PR-33.3-D01]: typer-internal carrier produced by
           // `TemplateInstantiator.convertLoweredArm` (Plus arm) for fields originating from a
           // `+ Template[Args]` inline expansion. Field-level conversion is identical to
           // `FieldDef`; the variant tag only matters for the duplicate-name detection below.
-          dtoFieldToDefs(f.field, f.meta)
+          dtoFieldToDefs(id, f.field, f.meta)
+        case p: RawDtoMember.FnProperty =>
+          F.fail(BaboonIssue.of(VerificationIssue.FnNotSupported(id, "fn property", p.meta)))
         case p: RawDtoMember.ParentDef =>
           // PR-33.2 (M33): when args.isDefined, the TemplateInstantiator pre-pass has already
           // spliced the substituted FieldDefs into the receiving DTO's member list (Approach M1).
@@ -283,7 +297,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
       }
       removed <- F.flatTraverseAccumErrors(dto.members) {
         case f: RawDtoMember.UnfieldDef =>
-          dtoFieldToDefs(f.field, f.meta)
+          dtoFieldToDefs(id, f.field, f.meta)
         case p: RawDtoMember.UnparentDef =>
           // PR-33.2 (M33): when args.isDefined, the TemplateInstantiator pre-pass has already
           // converted each substituted FieldDef into an UnfieldDef and spliced them into the
@@ -307,7 +321,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
           // Field equality matches the receiver's other-arm-produced fields exactly.
           // PR-33.2-D06: per-field meta is preserved on each FieldDef so diagnostics anchor at
           // the original template-body field declaration site (not at the `^` operator position).
-          F.flatTraverseAccumErrors(f.fields)(fd => dtoFieldToDefs(fd.field, fd.meta))
+          F.flatTraverseAccumErrors(f.fields)(fd => dtoFieldToDefs(id, fd.field, fd.meta))
         case _ =>
           F.pure(Seq.empty)
       }
@@ -440,18 +454,26 @@ class BaboonTranslator[F[+_, +_]: Error2](
       lcName =>
         grouped.get(lcName).toList.flatMap {
           group =>
-            val representative = group.head
-            val distinctDefaults = group.map(_.default).distinct
-            distinctDefaults match {
-              case List(None)        => List(representative.copy(default = None))
-              case List(Some(d))     => List(representative.copy(default = Some(d)))
-              case _                 =>
-                val nonEmpty = distinctDefaults.collect { case Some(d) => d }.distinct
-                if (nonEmpty.size == 1) {
-                  List(representative.copy(default = Some(nonEmpty.head)))
-                } else {
-                  List.empty
-                }
+            val distinctTypes = group.map(_.tpe).distinct
+            if (distinctTypes.size > 1) {
+              // Same field name with different types cannot be merged. Preserve all
+              // entries so the downstream duplicate-name check can fire
+              // `NonUniqueFields` with the correct provenance.
+              group
+            } else {
+              val representative = group.head
+              val distinctDefaults = group.map(_.default).distinct
+              distinctDefaults match {
+                case List(None)        => List(representative.copy(default = None))
+                case List(Some(d))     => List(representative.copy(default = Some(d)))
+                case _                 =>
+                  val nonEmpty = distinctDefaults.collect { case Some(d) => d }.distinct
+                  if (nonEmpty.size == 1) {
+                    List(representative.copy(default = Some(nonEmpty.head)))
+                  } else {
+                    List.empty
+                  }
+              }
             }
         }
     }
@@ -460,12 +482,17 @@ class BaboonTranslator[F[+_, +_]: Error2](
       lcName =>
         grouped.get(lcName).toList.flatMap {
           group =>
-            val distinctDefaults = group.map(_.default).distinct
-            val nonEmpty = distinctDefaults.collect { case Some(d) => d }.distinct
-            if (nonEmpty.size > 1) {
-              List((group.head.name, nonEmpty))
-            } else {
+            val distinctTypes = group.map(_.tpe).distinct
+            if (distinctTypes.size > 1) {
               List.empty
+            } else {
+              val distinctDefaults = group.map(_.default).distinct
+              val nonEmpty = distinctDefaults.collect { case Some(d) => d }.distinct
+              if (nonEmpty.size > 1) {
+                List((group.head.name, nonEmpty))
+              } else {
+                List.empty
+              }
             }
         }
     }

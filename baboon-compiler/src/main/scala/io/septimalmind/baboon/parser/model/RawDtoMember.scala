@@ -14,6 +14,15 @@ sealed trait RawDtoMember
 object RawDtoMember {
   case class FieldDef(field: RawField, meta: RawNodeMeta) extends RawDtoMember
 
+  /** Phase A context-function read-only property carrier.
+    *
+    * Produced by the parser when a field declaration uses an `fn` initializer
+    * (`area: f32 = fn(self: Self) { ... }`). The typer intentionally rejects
+    * these with `VerificationIssue.FnNotSupported` until function bodies are
+    * lowered to a backend.
+    */
+  case class FnProperty(field: RawField, meta: RawNodeMeta) extends RawDtoMember
+
   /** PR-33.9 (M33): typer-internal carrier for a `RawDtoMember.FieldDef` whose origin is a
     * template-arm inline expansion (`+ Template[Args]` lowered by `TemplateInstantiator`).
     *
