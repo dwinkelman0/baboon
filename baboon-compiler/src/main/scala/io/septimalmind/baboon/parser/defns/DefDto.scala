@@ -4,7 +4,7 @@ import fastparse.*
 import io.septimalmind.baboon.parser.{ParserContext, model}
 import io.septimalmind.baboon.parser.defns.base.{DefDocs, Literals, idt, kw, struct}
 import io.septimalmind.baboon.parser.model.RawDtoMember.ContractRef
-import io.septimalmind.baboon.parser.model.{ExtractionKind, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawIdentifier, RawLookupScope, RawTypeName, RawTypeRef, ScopedRef}
+import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, ExtractionKind, RawBody, RawCapture, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawFn, RawFnParam, RawIdentifier, RawLocatorSeg, RawLookupScope, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef, ScopedRef}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.language.Quirks.Discarder
 
@@ -110,11 +110,31 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def defaultAnnotation[$: P]: P[RawDefaultValue] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    "@" ~ kw.default ~ "(" ~ defaultArg ~ ")"
+    "@" ~ kw.default ~ "(" ~/ defaultArg ~ ")"
+  }
+
+  private def normalizeAnnotation[$: P]: P[RawFn] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    "@" ~ kw.normalize ~ "(" ~/ fnDecl ~ ")"
+  }
+
+  private def migrateAnnotation[$: P]: P[RawMigrate] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("@" ~ kw.migrate ~ "(" ~/ fnDecl).flatMap { fn =>
+      P("," ~/ "[" ~ sourceRef.rep(sep = ",") ~ "]" ~ ")").map { sources =>
+        RawMigrate(fn, sources.toList)
+      }
+    }
+  }
+
+  private def sourceRef[$: P]: P[String] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    noWhitespaceImplicit.discard()
+    idt.symbolSeq.map(_.mkString("."))
   }
 
   private def defaultArg[$: P]: P[RawDefaultValue] = {
-    P(specialFloat | strLit | boolLit | nullLit | floatLit | intLit | enumIdent)
+    P(fnDecl.map(RawDefaultValue.Fn(_)) | specialFloat | strLit | boolLit | nullLit | floatLit | intLit | enumIdent)
   }
 
   private def specialFloat[$: P]: P[RawDefaultValue.SpecialFloat] = {
@@ -156,12 +176,177 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
     idt.symbolSeq.map(seq => RawDefaultValue.EnumRef(seq.mkString(".")))
   }
 
-  def fieldDef[$: P]: P[RawField] = {
+  // ─── context-function grammar (Phase A) ───────────────────────────────────
+
+  private def fnDecl[$: P]: P[RawFn] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    (defaultAnnotation.? ~ fieldName ~ ":" ~ typeRef ~ fieldWas.?).map { case (d, n, t, prev) =>
-      model.RawField(n, t, prev, d)
+    P("fn" ~/ ("[" ~ capture.rep(sep = ",") ~ "]").? ~ "(" ~ param.rep(sep = ",") ~ ")" ~ fnBody)
+      .map { case (captures, params, body) => RawFn(captures.toList.flatten, params.toList, body) }
+  }
+
+  private def capture[$: P]: P[RawCapture] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    (idt.symbol ~ ":" ~/ rootType ~ star.? ~ locator.?).map {
+      case (name, rt, s, loc) => RawCapture(name, rt, s, loc.getOrElse(Nil))
     }
   }
+
+  private def rootType[$: P]: P[RawTypeRef] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    (idt.symbol ~ ("[" ~/ typeRef.rep(sep = ",") ~ "]").?).map {
+      case (name, None)        => RawTypeRef.Simple(RawTypeName(name), Nil)
+      case (name, Some(params)) => RawTypeRef.Constructor(RawTypeName(name), NEList.unsafeFrom(params.toList), Nil)
+    }
+  }
+
+  private def star[$: P]: P[RawStarCapture] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    def steps = step.rep(1)
+    P("(" ~/ "$" ~ idt.symbol ~ "*" ~ ":" ~/ steps ~ ")")
+      .map { case (chainName, steps) => RawStarCapture(chainName, steps.toList) }
+  }
+
+  private def step[$: P]: P[RawLocatorSeg] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("." ~/ idt.symbol).map(RawLocatorSeg.Field.apply) |
+    P("[" ~/ "$" ~ idt.symbol ~ "]").map(RawLocatorSeg.Key.apply)
+  }
+
+  private def locator[$: P]: P[List[RawLocatorSeg]] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    step.rep.map(_.toList)
+  }
+
+  private def param[$: P]: P[RawFnParam] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    (idt.symbol ~ ":" ~/ typeRef).map { case (name, tpe) => RawFnParam(name, tpe) }
+  }
+
+  private def fnBody[$: P]: P[RawBody] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("{" ~/ letStmt.rep ~ expr ~ "}").map { case (lets, result) => RawBody(lets.toList, result) }
+  }
+
+  private def letStmt[$: P]: P[(String, BodyExpr)] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(kw.kw("let") ~/ idt.symbol ~ "=" ~/ expr ~ ";").map { case (name, e) => (name, e) }
+  }
+
+  private def expr[$: P]: P[BodyExpr]        = P(ifExpr | orExpr)
+  private def orExpr[$: P]: P[BodyExpr]      = binOpLevel(orOp, andExpr)
+  private def andExpr[$: P]: P[BodyExpr]     = binOpLevel(andOp, eqExpr)
+  private def eqExpr[$: P]: P[BodyExpr]      = binOpLevel(eqOp, relExpr)
+  private def relExpr[$: P]: P[BodyExpr]     = binOpLevel(relOp, addExpr)
+  private def addExpr[$: P]: P[BodyExpr]     = binOpLevel(addOp, mulExpr)
+  private def mulExpr[$: P]: P[BodyExpr]     = binOpLevel(mulOp, unary)
+
+  private def ifExpr[$: P]: P[BodyExpr] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(kw.`if` ~/ unary ~ "{" ~/ expr ~ "}" ~ kw.`else` ~ "{" ~/ expr ~ "}").map {
+      case (cond, thenE, elseE) => BodyExpr.If(cond, thenE, elseE)
+    }
+  }
+
+  private def orOp[$: P]: P[String]  = P("||").!
+  private def andOp[$: P]: P[String] = P("&&").!
+  private def eqOp[$: P]: P[String]  = P("==" | "!=").!
+  private def relOp[$: P]: P[String] = P("<=" | ">=" | "<" | ">").!
+  private def addOp[$: P]: P[String] = P("+" | "-").!
+  private def mulOp[$: P]: P[String] = P("*" | "/" | "%").!
+
+  private def binOpLevel[$: P](ops: => P[String], next: => P[BodyExpr]): P[BodyExpr] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(next ~ (ops ~ next).rep).map { case (first, rest) =>
+      rest.foldLeft(first) { case (l, (op, r)) => BodyExpr.BinOp(op, l, r) }
+    }
+  }
+
+  private def unary[$: P]: P[BodyExpr] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P((("-" | "!").! ~ primary).map { case (op, e) => BodyExpr.UnaryOp(op, e) } | primary)
+  }
+
+  private def primary[$: P]: P[BodyExpr] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P((literal | pathOrCall | "(" ~/ expr ~ ")") ~ callSuffix.rep).map { case (target, calls) =>
+      calls.foldLeft(target) { case (t, (method, args)) => BodyExpr.Call(t, method, args) }
+    }
+  }
+
+  private def pathOrCall[$: P]: P[BodyExpr] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(idt.symbol ~ segment.rep).map { case (root, segs) => BodyExpr.Path(root, segs.toList) }
+  }
+
+  private def segment[$: P]: P[BodyExpr.Segment] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("." ~ idt.symbol ~ !"(").map(BodyExpr.Segment.Field.apply) |
+    P("[" ~/ expr ~ "]").map(BodyExpr.Segment.Index.apply)
+  }
+
+  private def callArgs[$: P]: P[List[BodyExpr]] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("(" ~ ")").map(_ => Nil) |
+    P("(" ~/ expr ~ ("," ~/ expr).rep ~ ")").map { case (first, rest) =>
+      first :: rest.toList
+    }
+  }
+
+  private def callSuffix[$: P]: P[(String, List[BodyExpr])] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("." ~/ idt.symbol ~ callArgs).map { case (method, args) =>
+      if (!methodWhitelist.contains(method)) {
+        throw new IllegalArgumentException(s"method '$method' is not allowed in context functions; allowed methods: ${methodWhitelist.mkString(", ")}")
+      }
+      (method, args)
+    }
+  }
+
+  private def literal[$: P]: P[BodyExpr] = {
+    P(bodyFloatLit | bodyIntLit | bodyBoolLit | bodyNullLit | bodyStrLit)
+  }
+
+  private def bodyIntLit[$: P]: P[BodyExpr] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    P(Literals.Literals.Int.!).map(raw => BodyExpr.Lit(BodyLiteral.IntLit(raw.toLong)))
+  }
+
+  private def bodyFloatLit[$: P]: P[BodyExpr] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    P(Literals.Literals.Float.!).map(raw => BodyExpr.Lit(BodyLiteral.FloatLit(raw.toDouble)))
+  }
+
+  private def bodyBoolLit[$: P]: P[BodyExpr] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    (kw.kw("true").map(_ => BodyExpr.Lit(BodyLiteral.BoolLit(true))) |
+      kw.kw("false").map(_ => BodyExpr.Lit(BodyLiteral.BoolLit(false))))
+  }
+
+  private def bodyNullLit[$: P]: P[BodyExpr] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    kw.kw("null").map(_ => BodyExpr.Lit(BodyLiteral.NullLit))
+  }
+
+  private def bodyStrLit[$: P]: P[BodyExpr] = {
+    import fastparse.NoWhitespace.noWhitespaceImplicit
+    Literals.Literals.Str.map(s => BodyExpr.Lit(BodyLiteral.StrLit(s)))
+  }
+
+  private val methodWhitelist: Set[String] = Set(
+    "uppercase", "lowercase", "capitalize", "trim", "split", "join", "concat",
+    "contains", "startsWith", "endsWith", "toString", "length",
+    "abs", "min", "max", "floor", "ceil", "round",
+  )
+
+  private def fieldDefCore[$: P]: P[(RawField, Option[RawFn])] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    (defaultAnnotation.? ~ normalizeAnnotation.? ~ migrateAnnotation.? ~ fieldName ~ ":" ~/ typeRef ~ ("=" ~/ fnDecl).? ~ fieldWas.?).map {
+      case (d, n, m, name, tpe, propFn, prev) =>
+        (model.RawField(name, tpe, prev, d, n, m), propFn)
+    }
+  }
+
+  def fieldDef[$: P]: P[RawField] = fieldDefCore.map(_._1)
 
   // NOTE: BaboonWhitespace (imported below) consumes newlines, so `nonGenericTypeRef ~ typeParams.?`
   // allows `[…]` on a separate line to silently bind as args. This is safe contingent on no other
@@ -216,10 +401,12 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
   // freestanding `//!` on the next line silently bind to the previous field.
   // `suffixDoc` itself consumes a leading run of `[ \t]*` before the marker.
   // [PR-30.2-D01].
-  private def fieldDefWithSuffix[$: P]: P[(RawField, Option[RawDocComment])] = {
+  private def fieldDefWithSuffix[$: P]: P[((RawField, Option[RawFn]), Option[RawDocComment])] = {
     import fastparse.NoWhitespace.noWhitespaceImplicit
     noWhitespaceImplicit.discard()
-    P(fieldDef ~ docs.suffixDoc)
+    P(fieldDefCore ~ docs.suffixDoc).map { case (field, propFn, suffix) =>
+      ((field, propFn), suffix)
+    }
   }
 
   def dtoMember[$: P]: P[RawDtoMember] = {
@@ -229,9 +416,12 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
     // does not consume whitespace, so no implicit Whitespace import is needed
     // at this scope.
     P(meta.withMeta(fieldDefWithSuffix)).map {
-      case (m, (field, suffix)) =>
+      case (m, ((field, propFn), suffix)) =>
         val merged = m.copy(docs = RawDocs(m.docs.prefix, suffix))
-        model.RawDtoMember.FieldDef(field, merged)
+        propFn match {
+          case Some(fn) => model.RawDtoMember.FnProperty(field.copy(default = Some(RawDefaultValue.Fn(fn))), merged)
+          case None     => model.RawDtoMember.FieldDef(field, merged)
+        }
     } | P(meta.withMeta(parentDef)).map {
       case (meta, (parent, args)) =>
         model.RawDtoMember.ParentDef(parent, meta, args)

@@ -479,6 +479,9 @@ object BaboonFamilyManager {
       member match {
         case io.septimalmind.baboon.parser.model.RawDtoMember.FieldDef(_, meta) =>
           filesFromMeta(meta)
+        case io.septimalmind.baboon.parser.model.RawDtoMember.FnProperty(_, meta) =>
+          // Phase A context-function property; carries its parse-site meta.
+          filesFromMeta(meta)
         case io.septimalmind.baboon.parser.model.RawDtoMember.TemplateArmFieldDef(_, meta) =>
           // PR-33.9 (M33): typer-internal carrier for template-arm-origin FieldDef; treat
           // identically to FieldDef for files-from-meta accounting.

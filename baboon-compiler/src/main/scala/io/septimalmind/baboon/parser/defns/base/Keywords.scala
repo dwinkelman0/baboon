@@ -41,6 +41,10 @@ trait Keywords {
   def keep[$: P]: P[Unit]       = kw("keep")
   def drop[$: P]: P[Unit]       = kw("drop")
   def default[$: P]: P[Unit]    = kw("default")
+  def normalize[$: P]: P[Unit]   = kw("normalize")
+  def migrate[$: P]: P[Unit]     = kw("migrate")
+  def `if`[$: P]: P[Unit]        = kw("if")
+  def `else`[$: P]: P[Unit]      = kw("else")
 
   def apply[T](kw: => P[Unit], defparser: => P[T])(implicit v: P[?]): P[T] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
