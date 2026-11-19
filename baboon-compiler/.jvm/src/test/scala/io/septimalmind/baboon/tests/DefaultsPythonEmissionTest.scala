@@ -160,6 +160,89 @@ abstract class DefaultsPythonEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonTe
             defaultsRendering.contains("assert_trace((1 < 2), {}, \"one is less than two\")"),
             s"Expected fn assert_trace call. Source:\n$defaultsRendering",
           )
+          assert(
+            defaultsRendering.contains("def _baboon_default_Defaults_letField() -> int:"),
+            s"Expected let default helper. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("default_factory=_baboon_default_Defaults_letField"),
+            s"Expected let default_factory. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("n = (n + 1)"),
+            s"Expected let-assign lowering. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("def _baboon_default_Defaults_forField() -> int:"),
+            s"Expected for-loop default helper. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("while (i < 10):"),
+            s"Expected for-C while lowering. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("is not None"),
+            s"Expected match Some check. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("is None"),
+            s"Expected match None check. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("_baboon_normalize_normField"),
+            s"Expected normalize validator. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("object.__setattr__(self, 'normField'"),
+            s"Expected normalize setattr. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("def shouty(self)"),
+            s"Expected computed property. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("def _baboon_default_Defaults_letField() -> int:"),
+            s"Expected let-default helper. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("letField: int = Field(default_factory=_baboon_default_Defaults_letField)"),
+            s"Expected let-default factory field. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("n = (n + 1)"),
+            s"Expected assign lowering in default helper. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("forField: int = Field(default_factory=_baboon_default_Defaults_forField)"),
+            s"Expected for-default factory field. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("while (i < 10):") && defaultsRendering.contains("total = (total + i)"),
+            s"Expected C-style for lowering to while loop. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("matchField: str = Field(default_factory=_baboon_default_Defaults_matchField)") &&
+              defaultsRendering.contains("if _baboon_match_0 is not None:") &&
+              defaultsRendering.contains("elif _baboon_match_0 is None:") &&
+              defaultsRendering.contains("r = x"),
+            s"Expected match lowering to if/elif on opt variants. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("@model_validator(mode=\"after\")") &&
+              defaultsRendering.contains("def _baboon_normalize_normField(self):") &&
+              defaultsRendering.contains("object.__setattr__(self, 'normField',"),
+            s"Expected normalize post-init hook. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("def migrate_Defaults_migField(old) -> str:") &&
+              defaultsRendering.contains("return old.strip()"),
+            s"Expected migrate version function. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("def shouty(self) -> str:") &&
+              defaultsRendering.contains("return \"hey\".upper()"),
+            s"Expected computed property getter. Source:\n$defaultsRendering",
+          )
         }
     }
   }
