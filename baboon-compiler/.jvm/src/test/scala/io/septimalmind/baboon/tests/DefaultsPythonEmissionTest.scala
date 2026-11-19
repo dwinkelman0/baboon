@@ -140,6 +140,26 @@ abstract class DefaultsPythonEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonTe
             defaultsRendering.contains("negInfField: float = float('-inf')"),
             s"Expected -inf default. Source:\n$defaultsRendering",
           )
+          assert(
+            defaultsRendering.contains("fnIntField: int = (lambda: (40 + 2))()"),
+            s"Expected fn int default callable. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("fnStrField: str = (lambda: \"hello\".upper())()"),
+            s"Expected fn str default callable. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("fnBoolField: bool = (lambda: ((1 < 2) and (3 < 4)))()"),
+            s"Expected fn bool default callable. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("\"yes\" if (1 < 2) else \"no\""),
+            s"Expected fn if default callable. Source:\n$defaultsRendering",
+          )
+          assert(
+            defaultsRendering.contains("assert_trace((1 < 2), {}, \"one is less than two\")"),
+            s"Expected fn assert_trace call. Source:\n$defaultsRendering",
+          )
         }
     }
   }

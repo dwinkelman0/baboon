@@ -97,7 +97,7 @@ final class FnSensitivityTest extends AnyWordSpec {
     capture: Option[TypedCapture],
     scope: ScopeTable,
     attachment: FnSensitivityExtractor.Slot,
-  ): FnSensitivityExtractor.Sensitivity =
+  ): (Sensitivity, Sensitivity) =
     FnSensitivityExtractor.extract(body, capture, scope, schema, attachment) match {
       case Right(s)  => s
       case Left(err) => fail(s"expected sensitivity, got errors: ${err.mkString("; ")}")
@@ -114,8 +114,11 @@ final class FnSensitivityTest extends AnyWordSpec {
       case Right(s)  => fail(s"expected extraction failure, got $s")
     }
 
-  private def leaf(owner: String, segs: String*): FnSensitivityExtractor.SchemaPath =
-    FnSensitivityExtractor.SchemaPath(uid(owner), segs.toList)
+  private def leaf(owner: String, segs: String*): SchemaPath =
+    SchemaPath.resolve(uid(owner), segs.toList, schema) match {
+      case Right(p)  => p
+      case Left(err) => fail(s"bad expected path $owner.${segs.mkString(".")}: $err")
+    }
 
   // -- hand-built typed snippets (bypass the typer where it would reject the shape) --
 
@@ -136,19 +139,19 @@ final class FnSensitivityTest extends AnyWordSpec {
       }
       val scope = FnBodyTyper.seedScope(Nil, binds)
       val body  = mustType(Nil, path("b", fld("label")), scope, str)
-      val s     = mustExtract(body, Some(cap), scope, slot("Basket", "items"))
-      assert(s.leafReads == Set(leaf("Basket", "items", "label")))
-      assert(s.shapeReads.isEmpty)
-      assert(s.prevReads.isEmpty)
-      assert(s.writes == Set(leaf("Basket", "items")))
+      val (read, write) = mustExtract(body, Some(cap), scope, slot("Basket", "items"))
+      assert(read.leafReads == Set(leaf("Basket", "items", "label")))
+      assert(read.shapeReads.isEmpty)
+      assert(read.prevReads.isEmpty)
+      assert(write.leafReads == Set(leaf("Basket", "items")))
     }
 
     "read a self param as the owning DTO slot" in {
       val body = mustType(Nil, path("self", fld("count")), childScope(), i32)
-      val s    = mustExtract(body, None, childScope(), slot("Child", "count"))
-      assert(s.leafReads == Set(leaf("Child", "count")))
-      assert(s.shapeReads.isEmpty)
-      assert(s.writes == Set(leaf("Child", "count")))
+      val (read, write) = mustExtract(body, None, childScope(), slot("Child", "count"))
+      assert(read.leafReads == Set(leaf("Child", "count")))
+      assert(read.shapeReads.isEmpty)
+      assert(write.leafReads == Set(leaf("Child", "count")))
     }
 
     "record collection shape for for-in over a field" in {
@@ -158,10 +161,10 @@ final class FnSensitivityTest extends AnyWordSpec {
         BodyExpr.Block(Nil, Some(path("t"))),
       )
       val body = mustType(List(eff(loop)), strLit("done"), childScope(), str)
-      val s    = mustExtract(body, None, childScope(), slot("Child", "flag"))
-      assert(s.leafReads == Set(leaf("Child", "tags")))
-      assert(s.shapeReads == Set(uid("Child")))
-      assert(s.writes == Set(leaf("Child", "flag")))
+      val (read, write) = mustExtract(body, None, childScope(), slot("Child", "flag"))
+      assert(read.leafReads == Set(leaf("Child", "tags")))
+      assert(read.shapeReads == Set(uid("Child")))
+      assert(write.leafReads == Set(leaf("Child", "flag")))
     }
 
     "read star element leafs plus the collection shape" in {
@@ -179,9 +182,9 @@ final class FnSensitivityTest extends AnyWordSpec {
       }
       val scope = FnBodyTyper.seedScope(Nil, binds)
       val body  = mustType(Nil, path("c"), scope, str)
-      val s     = mustExtract(body, Some(cap), scope, slot("Basket", "items"))
-      assert(s.leafReads == Set(leaf("Basket", "items", "label")))
-      assert(s.shapeReads == Set(uid("Basket")))
+      val (read, _) = mustExtract(body, Some(cap), scope, slot("Basket", "items"))
+      assert(read.leafReads == Set(leaf("Basket", "items", "label")))
+      assert(read.shapeReads == Set(uid("Basket")))
     }
 
     "record a field assign as a write" in {
@@ -192,19 +195,19 @@ final class FnSensitivityTest extends AnyWordSpec {
         childScope(),
         i32,
       )
-      val s = mustExtract(body, None, childScope(), slot("Child", "flag"))
-      assert(s.leafReads == Set(leaf("Child", "count")))
-      assert(s.shapeReads.isEmpty)
-      assert(s.writes == Set(leaf("Child", "flag"), leaf("Child", "count")))
+      val (read, write) = mustExtract(body, None, childScope(), slot("Child", "flag"))
+      assert(read.leafReads == Set(leaf("Child", "count")))
+      assert(read.shapeReads.isEmpty)
+      assert(write.leafReads == Set(leaf("Child", "flag"), leaf("Child", "count")))
     }
 
     "expand a whole-record replacement to all fields (struct rule)" in {
       val selfT  = uref("Child")
       val target = tPath("self", Nil, selfT)
       val body   = tBody(List(TypedStmt.Effect(TypedExpr.Assign(target, tStrLit("x"), selfT))), tLit(0))
-      val s      = mustExtract(body, None, childScope(), slot("Child", "count"))
-      assert(s.leafReads.isEmpty)
-      assert(s.writes == Set(
+      val (read, write) = mustExtract(body, None, childScope(), slot("Child", "count"))
+      assert(read.leafReads.isEmpty)
+      assert(write.leafReads == Set(
         leaf("Child", "data"),
         leaf("Child", "tags"),
         leaf("Child", "scores"),
@@ -217,8 +220,8 @@ final class FnSensitivityTest extends AnyWordSpec {
     "collect assert condition reads" in {
       val cond = BodyExpr.BinOp(">", path("self", fld("count")), intLit(0))
       val body = mustType(List(BodyStmt.Assert(cond, None)), path("self", fld("count")), childScope(), i32)
-      val s    = mustExtract(body, None, childScope(), slot("Child", "count"))
-      assert(s.leafReads == Set(leaf("Child", "count")))
+      val (read, _) = mustExtract(body, None, childScope(), slot("Child", "count"))
+      assert(read.leafReads == Set(leaf("Child", "count")))
       assert(body.assertions.size == 1)
     }
 
@@ -231,9 +234,9 @@ final class FnSensitivityTest extends AnyWordSpec {
         ),
       )
       val body = mustType(List(eff(m)), strLit("z"), childScope(), str)
-      val s    = mustExtract(body, None, childScope(), slot("Child", "data"))
-      assert(s.leafReads == Set(leaf("Child", "maybe")))
-      assert(s.shapeReads == Set(uid("Child")))
+      val (read, _) = mustExtract(body, None, childScope(), slot("Child", "data"))
+      assert(read.leafReads == Set(leaf("Child", "maybe")))
+      assert(read.shapeReads == Set(uid("Child")))
     }
 
     "record the receiver owner for shape-inspecting calls" in {
@@ -242,19 +245,19 @@ final class FnSensitivityTest extends AnyWordSpec {
       val call   = TypedExpr.Call(target, "trim", Nil, str)
       val body   = tBody(Nil, call)
       val scope  = childScope("item" -> (ScopeEntry.Param(itemT): ScopeEntry))
-      val s      = mustExtract(body, None, scope, slot("Child", "count"))
-      assert(s.leafReads.isEmpty)
-      assert(s.shapeReads == Set(uid("Item")))
+      val (read, _) = mustExtract(body, None, scope, slot("Child", "count"))
+      assert(read.leafReads.isEmpty)
+      assert(read.shapeReads == Set(uid("Item")))
     }
 
     "record map index assign as slot plus map shape" in {
       val scope  = childScope("k" -> (ScopeEntry.Param(str): ScopeEntry))
       val target = path("self", fld("scores"), idx(path("k")))
       val body   = mustType(List(eff(BodyExpr.Assign(target, intLit(7)))), strLit("ok"), scope, str)
-      val s      = mustExtract(body, None, scope, slot("Child", "flag"))
-      assert(s.leafReads.isEmpty)
-      assert(s.shapeReads == Set(uid("Child")))
-      assert(s.writes == Set(leaf("Child", "flag"), leaf("Child", "scores")))
+      val (read, write) = mustExtract(body, None, scope, slot("Child", "flag"))
+      assert(read.leafReads.isEmpty)
+      assert(read.shapeReads == Set(uid("Child")))
+      assert(write.leafReads == Set(leaf("Child", "flag"), leaf("Child", "scores")))
     }
   }
 
@@ -275,11 +278,11 @@ final class FnSensitivityTest extends AnyWordSpec {
 
     "report no reads for a pure literal body" in {
       val body = tBody(Nil, tLit(1))
-      val s    = mustExtract(body, None, childScope(), slot("Child", "count"))
-      assert(s.leafReads.isEmpty)
-      assert(s.shapeReads.isEmpty)
-      assert(s.prevReads.isEmpty)
-      assert(s.writes == Set(leaf("Child", "count")))
+      val (read, write) = mustExtract(body, None, childScope(), slot("Child", "count"))
+      assert(read.leafReads.isEmpty)
+      assert(read.shapeReads.isEmpty)
+      assert(read.prevReads.isEmpty)
+      assert(write.leafReads == Set(leaf("Child", "count")))
     }
 
     "ignore assigns to let-locals instead of erroring" in {
@@ -290,15 +293,15 @@ final class FnSensitivityTest extends AnyWordSpec {
         childScope(),
         i32,
       )
-      val s = mustExtract(body, None, childScope(), slot("Child", "count"))
-      assert(s.writes == Set(leaf("Child", "count")))
-      assert(s.leafReads.isEmpty)
+      val (read, write) = mustExtract(body, None, childScope(), slot("Child", "count"))
+      assert(write.leafReads == Set(leaf("Child", "count")))
+      assert(read.leafReads.isEmpty)
     }
 
     "never report prev reads" in {
       val body = mustType(Nil, path("self", fld("data")), childScope(), str)
-      val s    = mustExtract(body, None, childScope(), slot("Child", "data"))
-      assert(s.prevReads.isEmpty)
+      val (read, _) = mustExtract(body, None, childScope(), slot("Child", "data"))
+      assert(read.prevReads.isEmpty)
     }
   }
 }

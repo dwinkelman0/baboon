@@ -108,7 +108,8 @@ class RsUEBACodecGenerator(
 
   private def genDtoCodec(defn: DomainMember.User, name: RsValue.RsType, dto: Typedef.Dto): TextTree[RsValue] = {
     // Compact mode encoder: fields written directly to writer
-    val encFields = dto.fields.map {
+    // prereq 4: computed fields are no-wire, skipped in UEBA positional codec.
+    val encFields = dto.fields.filter(_.computed.isEmpty).map {
       f =>
         val fieldRef = q"value.${toSnakeCase(f.name.name)}"
         if (needsBox(f.tpe)) {
@@ -145,7 +146,8 @@ class RsUEBACodecGenerator(
            |}""".stripMargin
     }
 
-    val decFields = dto.fields.map {
+    // prereq 4: computed fields are no-wire, skipped in UEBA positional codec.
+    val decFields = dto.fields.filter(_.computed.isEmpty).map {
       f =>
         val decoder = mkDecoder(f.tpe)
         if (needsBox(f.tpe)) {
@@ -155,7 +157,8 @@ class RsUEBACodecGenerator(
         }
     }
 
-    val ctorFields = dto.fields.map {
+    // prereq 4: computed fields are no-wire, skipped in UEBA positional codec.
+    val ctorFields = dto.fields.filter(_.computed.isEmpty).map {
       f =>
         q"${toSnakeCase(f.name.name)},"
     }

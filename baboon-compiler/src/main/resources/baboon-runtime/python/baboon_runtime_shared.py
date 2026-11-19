@@ -875,6 +875,18 @@ def domain_version(g: BaboonGenerated) -> BaboonDomainVersion:
     return BaboonDomainVersion(g.baboon_domain_identifier, g.baboon_domain_version)
 
 
+def assert_trace(cond, vars_dict=None, msg=None):
+    """Baboon fn `assert` runtime hook (cf. `@default(fn)` lowering).
+
+    Evaluates to True so lowered defaults can sequence it inside an expression
+    (``(assert_trace(...), value)[-1]``); raises AssertionError when `cond` is
+    falsy, attaching the traced variables and the message.
+    """
+    if not cond:
+        raise AssertionError(msg or f"baboon fn assertion failed: {vars_dict}")
+    return True
+
+
 def baboon_unmodified_since_version(g: BaboonGenerated) -> str:
     return g.baboon_same_in_versions[0]
 

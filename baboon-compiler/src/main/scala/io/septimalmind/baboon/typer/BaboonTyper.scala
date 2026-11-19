@@ -317,10 +317,12 @@ object BaboonTyper {
         case u: DomainMember.User =>
           u.defn match {
             case d: Typedef.Dto =>
-              val content = d.fields.flatMap(fieldRepr)
+              // prereq 4: computed fields are no-wire, excluded from deep id (wire order preserved).
+              val content = d.fields.filter(_.computed.isEmpty).flatMap(fieldRepr)
               List(s"[dto:$self]") ++ content ++ List(s"/[dto:$self]")
             case d: Typedef.Contract =>
-              val content = d.fields.flatMap(fieldRepr)
+              // prereq 4: computed fields are no-wire, excluded from deep id.
+              val content = d.fields.filter(_.computed.isEmpty).flatMap(fieldRepr)
               List(s"[contract:$self]") ++ content ++ List(s"/[contract:$self]")
             case s: Typedef.Service =>
               val content = s.methods.flatMap {
@@ -340,7 +342,8 @@ object BaboonTyper {
               List(s"[service:$self]") ++ content ++ List(s"/[service:$self]")
 
             case d: Typedef.Adt =>
-              val content = d.fields.flatMap(fieldRepr)
+              // prereq 4: computed fields are no-wire, excluded from deep id.
+              val content = d.fields.filter(_.computed.isEmpty).flatMap(fieldRepr)
               // branch order is the UEBA discriminant order: preserve it
               val branches = List("{", "branches") ++ d.members.toList
                 .flatMap(dependency) ++

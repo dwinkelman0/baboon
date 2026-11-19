@@ -2,8 +2,8 @@ package io.septimalmind.baboon.tests
 
 import io.septimalmind.baboon.parser.model._
 import io.septimalmind.baboon.typer.FnPipeline
-import io.septimalmind.baboon.typer.FnPipeline.{FnSiteInputs, TypedFn, ValidatedFnProgram}
-import io.septimalmind.baboon.typer.FnSensitivityExtractor.SchemaPath
+import io.septimalmind.baboon.typer.FnPipeline.{FnSiteInputs, ValidatedFnProgram}
+import io.septimalmind.baboon.typer.FnPipeline
 import io.septimalmind.baboon.typer.model._
 import io.septimalmind.baboon.typer.model.FnTypes.{ctor, scalar}
 import izumi.fundamentals.collections.nonempty.NEList
@@ -62,7 +62,11 @@ final class FnPipelineTest extends AnyWordSpec {
   private def cap1(name: String, root: String, segs: RawLocatorSeg*): RawCapture =
     RawCapture(name, rt(root), segs.toList.map(RawCaptureStep.Single(_)))
 
-  private def sp(owner: String, segs: String*): SchemaPath = SchemaPath(uid(owner), segs.toList)
+  private def sp(owner: String, segs: String*): SchemaPath =
+    SchemaPath.resolve(uid(owner), segs.toList, schema) match {
+      case Right(p)  => p
+      case Left(err) => fail(s"bad expected path $owner.${segs.mkString(".")}: $err")
+    }
 
   private def in(
     owner: String,
@@ -154,7 +158,7 @@ final class FnPipelineTest extends AnyWordSpec {
       )
       val p = mustAssemble(sites)
       val ordered = renders(p).toSet
-      p.fns.foreach { case (site, _: TypedFn, _) =>
+      p.fns.foreach { case (site, _: FnPipeline.TypedFn, _) =>
         val id = site.id
         assert(
           ordered.exists(_.contains(s"${id.field}")),

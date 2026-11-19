@@ -22,4 +22,9 @@ root data Defaults {
   @default(nan)         nanField:    f64
   @default(+inf)        posInfField: f64
   @default(-inf)        negInfField: f64
+  @default(fn() { 40 + 2 })                                   fnIntField:    i32
+  @default(fn() { "hello".uppercase() })                      fnStrField:    str
+  @default(fn() { 1 < 2 && 3 < 4 })                           fnBoolField:   bit
+  @default(fn() { if (1 < 2) { "yes" } else { "no" } })       fnIfField:     str
+  @default(fn() { assert(1 < 2, "one is less than two"); 7 }) fnAssertField: i32
 }

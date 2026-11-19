@@ -120,6 +120,8 @@ object PyTypes {
   val pyBaboonBytes  = PyType(pyBaboonSharedRuntimeModule, "BaboonBytes")
   val pyBytesFromHex = PyType(pyBaboonSharedRuntimeModule, "bytes_from_hex")
   val pyInt64FromJson = PyType(pyBaboonSharedRuntimeModule, "int64_from_json")
+  // Baboon fn `assert` runtime hook (cf. `@default(fn)` lowering in PyDefnTranslator).
+  val pyAssertTrace = PyType(pyBaboonSharedRuntimeModule, "assert_trace")
   val pyFloat        = PyType(pyBuiltins, "float")
   val pyDecimal      = PyType(pyDecimalModule, "Decimal")
   val pyBool         = PyType(pyBuiltins, "bool")

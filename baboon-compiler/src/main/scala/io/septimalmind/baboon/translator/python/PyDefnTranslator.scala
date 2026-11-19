@@ -542,6 +542,16 @@ object PyDefnTranslator {
     }
 
     private def genDtoFields(dtoFields: List[Field], contractsFields: Set[Field]): List[TextTree[PyValue]] = {
+      // `normalize`/`migrate`/`computed` have no Python lowering yet; fail
+      // with a clear per-backend error instead of silently dropping them.
+      dtoFields.foreach { f =>
+        if (f.normalize.isDefined)
+          sys.error(s"normalize fn on field `${f.name.name}` is not yet lowered for the python backend")
+        if (f.migrate.isDefined)
+          sys.error(s"migrate fn on field `${f.name.name}` is not yet lowered for the python backend")
+        if (f.computed.isDefined)
+          sys.error(s"computed fn on field `${f.name.name}` is not yet lowered for the python backend")
+      }
       val fields = dtoFields.map {
         field =>
           val plan      = PyFieldPlan(field, contractsFields.contains(field))
@@ -600,11 +610,142 @@ object PyDefnTranslator {
             case FieldDefault.SpecialFloatKind.PosInf => q"float('inf')"
             case FieldDefault.SpecialFloatKind.NegInf => q"float('-inf')"
           }
-        // Unreachable until Fn is lowered for this backend (typer gates reject
-        // FieldDefault.Fn before backends run); kept exhaustive per P1.
-        case FieldDefault.Fn(_) =>
-          sys.error("FieldDefault.Fn defaults are not yet lowered for the python backend")
+        case FieldDefault.Fn(fn) =>
+          renderPyDefaultFn(fn, field)
       }
+    }
+
+    // Python slice: inline `@default(fn)` lowering for leaf-typed fns.
+    // Zero-arg fns are emitted as immediately-invoked lambdas in
+    // `Field(default=...)` position so pydantic sees a plain value default; a
+    // present capture root becomes the lambda's argument. Only
+    // pure-expression bodies over BinOp/Call/If/Lit/Path (plus unary `!`/`-`)
+    // are supported; everything else (lets, loops, match, blocks, free
+    // variables, non-leaf types) is a clear per-backend error. Other backends
+    // keep their own not-yet-lowered error. `normalize`/`migrate`/`computed`
+    // are rejected in `genDtoFields`.
+    private def renderPyDefaultFn(fn: TypedFn, field: Field): TextTree[PyValue] = {
+      def err(what: String): Nothing =
+        sys.error(s"@default(fn) for field `${field.name.name}`: $what is not yet lowered for the python backend")
+      fn.expected match {
+        case TypeRef.Scalar(_: TypeId.BuiltinScalar) => ()
+        case other                                   => err(s"non-leaf default type $other")
+      }
+      val nonAssertStmts = fn.body.stmts.filter {
+        case io.septimalmind.baboon.typer.model.TypedStmt.Assert(_) => false
+        case _                                                      => true
+      }
+      if (nonAssertStmts.nonEmpty) {
+        val kinds = nonAssertStmts.map {
+          case io.septimalmind.baboon.typer.model.TypedStmt.Let(_, _, _) => "let"
+          case io.septimalmind.baboon.typer.model.TypedStmt.Effect(expr) =>
+            expr match {
+              case io.septimalmind.baboon.typer.model.TypedExpr.Assign(_, _, _) => "assign"
+              case io.septimalmind.baboon.typer.model.TypedExpr.ForIn(_, _, _, _) => "loop"
+              case io.septimalmind.baboon.typer.model.TypedExpr.ForC(_, _, _, _, _) => "loop"
+              case io.septimalmind.baboon.typer.model.TypedExpr.Match(_, _, _) => "match"
+              case io.septimalmind.baboon.typer.model.TypedExpr.Block(_, _, _) => "block"
+              case _ => "statement"
+            }
+          case io.septimalmind.baboon.typer.model.TypedStmt.Assert(_) => "assert"
+        }.distinct.mkString("/")
+        err(s"statement bodies ($kinds — only assert statements are lowered; let/assign/loop/match are)")
+      }
+      val argNames = fn.capture.map(_.name).toList
+      val result   = renderPyFnExpr(fn.body.result, argNames, field)
+      val asserts  = fn.body.assertions.map(a => renderPyAssertTrace(a, argNames, field))
+      val body =
+        if (asserts.isEmpty) result
+        else q"(${(asserts :+ result).join(", ")})[-1]"
+      if (argNames.isEmpty) q"(lambda: $body)()"
+      else q"(lambda ${argNames.map(escapePyKeyword).mkString(", ")}: $body)"
+    }
+
+    private def renderPyFnExpr(expr: TypedExpr, args: List[String], field: Field): TextTree[PyValue] = {
+      def err(what: String): Nothing =
+        sys.error(s"@default(fn) for field `${field.name.name}`: $what is not yet lowered for the python backend")
+      expr match {
+        case TypedExpr.Lit(lit, _) =>
+          lit match {
+            case TypedLit.IntLit(v)   => q"${v.toString}"
+            case TypedLit.FloatLit(v) =>
+              if (v.isNaN) q"float('nan')"
+              else if (v.isPosInfinity) q"float('inf')"
+              else if (v.isNegInfinity) q"float('-inf')"
+              else q"${v.toString}"
+            case TypedLit.BoolLit(v) => if (v) q"True" else q"False"
+            case TypedLit.StrLit(v)  => q"${renderPyString(v)}"
+            case TypedLit.NullLit()  => q"None"
+          }
+        case TypedExpr.Path(root, segments, _) =>
+          if (!args.contains(root)) err(s"free variable `$root` (only the capture root is in scope)")
+          segments.foldLeft[TextTree[PyValue]](q"${escapePyKeyword(root)}") {
+            case (acc, TypedPathSeg.Field(name, _))  => q"$acc.${escapePyKeyword(name)}"
+            case (acc, TypedPathSeg.Index(index, _)) => q"$acc[${renderPyFnExpr(index, args, field)}]"
+          }
+        case TypedExpr.BinOp(op, left, right, _) =>
+          val pyOp = op match {
+            case "&&" => "and"
+            case "||" => "or"
+            case "==" | "!=" | "<" | "<=" | ">" | ">=" | "+" | "-" | "*" | "/" | "%" => op
+            case _    => err(s"binary operator `$op`")
+          }
+          q"(${renderPyFnExpr(left, args, field)} $pyOp ${renderPyFnExpr(right, args, field)})"
+        case TypedExpr.UnaryOp(op, inner, _) =>
+          op match {
+            case "!" => q"(not ${renderPyFnExpr(inner, args, field)})"
+            case "-" => q"(-${renderPyFnExpr(inner, args, field)})"
+            case _   => err(s"unary operator `$op`")
+          }
+        case TypedExpr.If(cond, thenE, elseE, _) =>
+          q"(${renderPyFnExpr(thenE, args, field)} if ${renderPyFnExpr(cond, args, field)} else ${renderPyFnExpr(elseE, args, field)})"
+        case TypedExpr.Call(target, method, callArgs, _) =>
+          renderPyFnCall(renderPyFnExpr(target, args, field), method, callArgs.map(renderPyFnExpr(_, args, field)), field)
+        case other =>
+          err(s"expression `${other.getClass.getSimpleName}`")
+      }
+    }
+
+    private def renderPyFnCall(
+      target: TextTree[PyValue],
+      method: String,
+      args: List[TextTree[PyValue]],
+      field: Field,
+    ): TextTree[PyValue] = {
+      def err(what: String): Nothing =
+        sys.error(s"@default(fn) for field `${field.name.name}`: $what is not yet lowered for the python backend")
+      def one: TextTree[PyValue] = args match {
+        case List(a) => a
+        case _       => err(s"method `$method` arity ${args.size}")
+      }
+      method match {
+        case "uppercase"                    => q"$target.upper()"
+        case "lowercase"                    => q"$target.lower()"
+        case "capitalize"                   => q"$target.capitalize()"
+        case "trim"                         => q"$target.strip()"
+        case "toString" if args.isEmpty     => q"str($target)"
+        case "length" if args.isEmpty       => q"len($target)"
+        case "split"                        => q"$target.split($one)"
+        case "contains"                     => q"($one in $target)"
+        case "startsWith"                   => q"$target.startswith($one)"
+        case "endsWith"                     => q"$target.endswith($one)"
+        case "concat"                       => q"($target + $one)"
+        case "join"                         => q"($one.join($target))"
+        case "abs" if args.isEmpty          => q"abs($target)"
+        case "round" if args.isEmpty        => q"round($target)"
+        case "min"                          => q"min($target, $one)"
+        case "max"                          => q"max($target, $one)"
+        case "floor" | "ceil"               => err(s"method `$method` (needs math import)")
+        case _                              => err(s"method `$method`")
+      }
+    }
+
+    private def renderPyAssertTrace(assert: TypedAssert, args: List[String], field: Field): TextTree[PyValue] = {
+      val cond = renderPyFnExpr(assert.cond, args, field)
+      val vars =
+        assert.capturedVars.distinct.map(v => s"'$v': ${escapePyKeyword(v)}").mkString("{", ", ", "}")
+      val msg = assert.msg.map(m => renderPyFnExpr(m, args, field)).getOrElse(q"None")
+      q"$pyAssertTrace($cond, $vars, $msg)"
     }
 
     private def genDtoProperties(contractsFields: List[Field]): Option[List[TextTree[PyValue]]] = {

@@ -226,7 +226,8 @@ class PyUEBACodecGenerator(
     // Use the keyword-escaped attribute name for constructor kwargs.
     // Keyword fields use `class_=decoder` (requires populate_by_name=True in model_config).
     val fieldPlans = PyFieldPlan.forDto(domain, dto)
-    val fieldsDecoders = dto.fields.zip(fields.map(_._2)).map {
+    // prereq 4: computed fields are no-wire; layout already excludes them, so zip wire fields only.
+    val fieldsDecoders = dto.fields.filter(_.computed.isEmpty).zip(fields.map(_._2)).map {
       case (field, decoder) =>
         val attrName = fieldPlans(field).constructorName
         q"$attrName=$decoder"
