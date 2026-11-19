@@ -17,6 +17,33 @@ object BodyExpr {
   final case class BinOp(op: String, left: BodyExpr, right: BodyExpr) extends BodyExpr
   final case class UnaryOp(op: String, expr: BodyExpr) extends BodyExpr
   final case class If(cond: BodyExpr, thenE: BodyExpr, elseE: BodyExpr) extends BodyExpr
+
+  // ── structure-changing nodes (statement position only; expression nodes above are untouched) ──
+  final case class Assign(target: BodyExpr, value: BodyExpr) extends BodyExpr
+  final case class ForIn(varName: String, iterable: BodyExpr, body: Block) extends BodyExpr
+  final case class ForC(init: ForInit, cond: BodyExpr, step: BodyExpr, body: Block) extends BodyExpr
+  final case class Match(scrutinee: BodyExpr, arms: List[MatchArm]) extends BodyExpr
+  final case class Block(stmts: List[BodyStmt], value: Option[BodyExpr]) extends BodyExpr
+}
+
+/** C-style for-loop initializer: `name (: tpe)? = value`. */
+final case class ForInit(name: String, tpe: Option[RawTypeRef], value: BodyExpr)
+
+final case class MatchArm(pattern: MatchPattern, body: BodyExpr.Block)
+
+sealed trait MatchPattern
+
+object MatchPattern {
+  final case class Variant(name: String, binding: Option[String]) extends MatchPattern
+  case object Wildcard extends MatchPattern
+}
+
+/** Statement-level nodes for fn bodies and blocks. */
+sealed trait BodyStmt
+
+object BodyStmt {
+  final case class Let(name: String, tpe: Option[RawTypeRef], value: BodyExpr) extends BodyStmt
+  final case class Effect(expr: BodyExpr) extends BodyStmt
 }
 
 sealed trait BodyLiteral
