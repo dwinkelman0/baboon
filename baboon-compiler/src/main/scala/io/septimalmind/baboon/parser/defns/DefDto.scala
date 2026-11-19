@@ -178,10 +178,15 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   // ─── context-function grammar (Phase A) ───────────────────────────────────
 
+  // Single-capture limit: at most one `[name: Type...]` head per fn. Two captures
+  // (`fn[a: A, b: B]...`) is a parse failure (the `]` expectation fails after the
+  // first capture and the cut after `fn` prevents silent backtracking). Zero-capture
+  // `fn(...){...}` (no brackets) stays valid. Previous-version `!old: T` prefix
+  // syntax is deferred — `!` is not accepted here (unary `!` lives only in body exprs).
   private def fnDecl[$: P]: P[RawFn] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P("fn" ~/ ("[" ~ capture.rep(sep = ",") ~ "]").? ~ "(" ~ param.rep(sep = ",") ~ ")" ~ fnBody)
-      .map { case (captures, params, body) => RawFn(captures.toList.flatten, params.toList, body) }
+    P("fn" ~/ ("[" ~ capture ~ "]").? ~ "(" ~ param.rep(sep = ",") ~ ")" ~ fnBody)
+      .map { case (captures, params, body) => RawFn(captures.toList, params.toList, body) }
   }
 
   private def capture[$: P]: P[RawCapture] = {
@@ -213,6 +218,11 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def step[$: P]: P[RawLocatorSeg] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    // No grammar change needed for transparent collections: traversal through
+    // lst/map/set/opt (including implied opt.Some payload situating) is just a
+    // `.field` chain, with optional `[$k]` keys in instance-style paths.
+    // Explicit `.Some` parses as Field("Some") here (typer resolves it later);
+    // Variant parsing is intentionally NOT reintroduced at AST level.
     P("." ~/ idt.symbol).map(RawLocatorSeg.Field.apply) |
     P("[" ~/ "$" ~ idt.symbol ~ "]").map(RawLocatorSeg.Key.apply)
   }

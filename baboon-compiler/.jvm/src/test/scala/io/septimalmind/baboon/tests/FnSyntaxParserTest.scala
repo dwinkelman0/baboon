@@ -193,17 +193,12 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       assert(fn.body.result.isInstanceOf[BodyExpr.If])
     }
 
-    "parse multi-capture fn[a: A, b: B](x: X) { x }" in {
-      val f = onlyField("data D { @default(fn[a: A, b: B](x: X) { x }) y: str }")
-      val fn = unwrapFn(f.field.default)
-      assert(fn.captures.size == 2)
-      assert(fn.captures.map(_.name) == List("a", "b"))
-      assertSimpleType(fn.captures.head.rootType, "A")
-      assertSimpleType(fn.captures.tail.head.rootType, "B")
-      assert(fn.params.size == 1)
-      assert(fn.params.head.name == "x")
-      assertSimpleType(fn.params.head.tpe, "X")
-      assert(fn.body.result == BodyExpr.Path("x", Nil))
+    "reject multi-capture fn[a: A, b: B](x: X) { x }" in {
+      expectParseFailure("data D { @default(fn[a: A, b: B](x: X) { x }) y: str }")
+    }
+
+    "reject !prev capture prefix fn[!old: T](x: X) { x }" in {
+      expectParseFailure("data D { @default(fn[!old: T](x: X) { x }) y: str }")
     }
 
     "parse star capture with trailing locator" in {
@@ -712,6 +707,50 @@ final class FnSyntaxParserTest extends AnyWordSpec {
           RawLocatorSeg.Key("i"),
         ))),
         RawCaptureStep.Single(RawLocatorSeg.Field("tail")),
+      ))
+    }
+
+    "parse canonical opt-transparent situating without .Some" in {
+      // Canonical opt/set-transparent situating: Child.data inside MyStruct.member —
+      // collections are transparent, so traversal is ordinary .field steps.
+      val f = onlyField("data D { @default(fn[s: MyStruct.member.data]() { s }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("member")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("data")),
+      ))
+    }
+
+    "parse explicit .Some as Field (allowed but non-canonical)" in {
+      // Allowed but non-canonical: .Some is implied when descending into the opt
+      // payload, so it parses as Field("Some") at AST level (never Variant).
+      val f = onlyField("data D { @default(fn[s: MyStruct.member.Some.data]() { s }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("member")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("Some")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("data")),
+      ))
+    }
+
+    "parse instance-style key through collection member" in {
+      // Instance-style, not required for schema situating: [$i] keys still parse.
+      val f = onlyField("data D { @default(fn[s: MyStruct.member[$i].data]() { s }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("member")),
+        RawCaptureStep.Single(RawLocatorSeg.Key("i")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("data")),
+      ))
+    }
+
+    "parse star through collection with trailing field" in {
+      // Star expansion through a transparent collection: members iterated, .data situated.
+      val f = onlyField("data D { @default(fn[s: MyStruct.members($c* : .data)]() { s }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("members")),
+        RawCaptureStep.Star(RawStarCapture("c", List(RawLocatorSeg.Field("data")))),
       ))
     }
 
