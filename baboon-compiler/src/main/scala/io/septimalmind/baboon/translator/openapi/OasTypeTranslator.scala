@@ -203,6 +203,8 @@ class OasTypeTranslator {
       case FieldDefault.EnumVal(memberName)    => Some(Json.fromString(memberName))
       case FieldDefault.NullVal                => None
       case FieldDefault.SpecialFloatVal(_)     => None
+      // Fn defaults are eval-only and never reach the codec (cf. FieldDefault.Fn).
+      case FieldDefault.Fn(_)                  => None
     }
   }
 

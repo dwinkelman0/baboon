@@ -1,6 +1,5 @@
 package io.septimalmind.baboon.typer
 
-import io.septimalmind.baboon.typer.FnSensitivityExtractor.{SchemaPath, Sensitivity}
 import io.septimalmind.baboon.typer.model._
 import io.septimalmind.baboon.typer.model.FnTypes._
 
@@ -35,13 +34,15 @@ import io.septimalmind.baboon.typer.model.FnTypes._
   */
 object FnReadGate {
 
-  /** One fn awaiting gating. `declaredSources` is the migrate source set; it must be
+  /** One fn awaiting gating. `read` / `write` are the P4 sensitivities;
+    * `declaredSources` is the migrate source set; it must be
     * empty for non-`migrate` roles (not enforced — ignored outside `migrate`).
     */
   final case class Input(
     site: FnSite,
     body: TypedBody,
-    sensitivity: Sensitivity,
+    read: Sensitivity,
+    write: Sensitivity,
     declaredSources: Set[SchemaPath]
   )
 
@@ -53,7 +54,8 @@ object FnReadGate {
     site: FnSite,
     owner: TypeId.User,
     body: TypedBody,
-    sensitivity: Sensitivity,
+    read: Sensitivity,
+    write: Sensitivity,
     pass: Int,
     readTargets: Set[SchemaPath]
   )
@@ -90,8 +92,7 @@ object FnReadGate {
   /** Slot granularity: the materialization unit is the head field of a leaf path
     * (`Basket.items.label` materializes with slot `Basket.items`).
     */
-  def slotOf(p: SchemaPath): SchemaPath =
-    SchemaPath(p.owner, p.segments.headOption.toList)
+  def slotOf(p: SchemaPath): SchemaPath = p.slot
 
   def gate(inputs: List[Input], schema: FnSchema): Either[List[String], List[Gated]] = {
     val errors = List.newBuilder[String]
@@ -111,14 +112,14 @@ object FnReadGate {
     // -- 2. computed slots (pass-2 materialization units) ----------------------
     val computedSlots: Set[SchemaPath] = resolved.collect {
       case Some((in, owner)) if in.site.id.role == FnRole.Computed =>
-        SchemaPath(owner, List(in.site.id.field))
-    }.toSet
+        SchemaPath.resolve(owner, List(in.site.id.field), schema)
+    }.collect { case Right(p) => p }.toSet
 
     // -- 3. per-fn checks -------------------------------------------------------
     val out = resolved.collect { case Some((in, owner)) =>
       val tag = s"fn ${renderSite(in.site)}"
 
-      in.sensitivity.leafReads.foreach { r =>
+      in.read.leafReads.foreach { r =>
         resolvePath(schema, r) match {
           case Some(m) => errors += s"$tag: $m"
           case None    => ()
@@ -133,21 +134,21 @@ object FnReadGate {
 
       in.site.id.role match {
         case FnRole.Default | FnRole.Normalize =>
-          in.sensitivity.leafReads.foreach { r =>
+          in.read.leafReads.foreach { r =>
             if (computedSlots.contains(slotOf(r)))
               errors += s"$tag: ${roleName(in.site.id.role)} fn reads computed slot ${slotOf(r).render} " +
                 s"(computed fields materialize in pass 2, after defaults)"
           }
         case FnRole.Migrate =>
           val allowed = in.declaredSources.map(slotOf)
-          in.sensitivity.leafReads.foreach { r =>
+          in.read.leafReads.foreach { r =>
             if (!allowed.contains(slotOf(r)))
               errors += s"$tag: migrate fn reads undeclared source ${r.render} (declare it in sources)"
           }
         case FnRole.Computed => ()
       }
 
-      Gated(in.site, owner, in.body, in.sensitivity, passOf(in.site.id.role), in.sensitivity.leafReads)
+      Gated(in.site, owner, in.body, in.read, in.write, passOf(in.site.id.role), in.read.leafReads)
     }
 
     val errs = errors.result().distinct
@@ -157,33 +158,16 @@ object FnReadGate {
   // -- schema path validation (mirrors the P4 extractor walk) -------------------
 
   private def resolvePath(schema: FnSchema, path: SchemaPath): Option[String] = {
-    if (schema.lookup(path.owner.name.name).isEmpty)
-      return Some(s"unknown type: ${path.owner.name.name}")
-    var cur: TypeRef = TypeRef.Scalar(path.owner)
-    val it           = path.segments.iterator
+    if (schema.lookup(path.root.name.name).isEmpty)
+      return Some(s"unknown type: ${path.root.name.name}")
+    var cur: TypeRef = TypeRef.Scalar(path.root)
+    val it           = path.fieldNames.iterator
     while (it.hasNext) {
-      stepField(schema, cur, it.next()) match {
-        case Right(n) => cur = n
-        case Left(m)  => return Some(m)
+      SchemaPath.stepField(cur, it.next(), schema) match {
+        case Right((_, n)) => cur = n
+        case Left(m)       => return Some(m)
       }
     }
     None
-  }
-
-  private def stepField(schema: FnSchema, cur: TypeRef, seg: String): Either[String, TypeRef] = {
-    val t    = peelOpt(cur)
-    val elem =
-      if (isLst(t) || isSet(t) || isMap(t)) elemType(t)
-      else Some(t)
-    elem.toRight(s"cannot situate into $t").flatMap { et =>
-      dtoFields(et, schema).toRight(s"no fields on $et (field `$seg`)").flatMap { fs =>
-        fs.find(_.name.name == seg).toRight(s"unknown field `$seg` on $et").map(_.tpe)
-      }
-    }
-  }
-
-  private def peelOpt(t: TypeRef): TypeRef = t match {
-    case x if isOpt(x) => elemType(x).map(peelOpt).getOrElse(x)
-    case x             => x
   }
 }

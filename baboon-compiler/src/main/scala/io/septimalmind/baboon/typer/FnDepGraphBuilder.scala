@@ -1,6 +1,5 @@
 package io.septimalmind.baboon.typer
 
-import io.septimalmind.baboon.typer.FnSensitivityExtractor.{SchemaPath, Sensitivity}
 import io.septimalmind.baboon.typer.model._
 import io.septimalmind.baboon.typer.model.FnTypes._
 
@@ -67,7 +66,8 @@ object FnDepGraphBuilder {
     */
   final case class Input(
     id: FnNodeId,
-    sensitivity: Sensitivity,
+    read: Sensitivity,
+    write: Sensitivity,
     captureOwner: Option[TypeId.User],
     pass: Int
   )
@@ -92,7 +92,7 @@ object FnDepGraphBuilder {
   ): List[Input] =
     gated.map { g =>
       val id = nodeIdOf(g)
-      Input(id, g.sensitivity, captures.get(id).flatten.flatMap(captureOwnerOf), g.pass)
+      Input(id, g.read, g.write, captures.get(id).flatten.flatMap(captureOwnerOf), g.pass)
     }
 
   def build(inputs: List[Input], schema: FnSchema): Either[List[String], EmissionOrder] = {
@@ -108,8 +108,8 @@ object FnDepGraphBuilder {
       dtoFields(TypeRef.Scalar(o), schema).getOrElse(Nil).map(f => DepNode.FieldSlot(o, f.name.name))
     }
     val ioSlots: Set[DepNode.FieldSlot] = inputs.flatMap { i =>
-      val paths = i.sensitivity.leafReads ++ i.sensitivity.writes ++ i.sensitivity.prevReads
-      paths.map(p => DepNode.FieldSlot(p.owner, p.segments.headOption.getOrElse(""))) +
+      val paths = i.read.leafReads ++ i.write.leafReads
+      paths.map(p => DepNode.FieldSlot(p.root, p.headName.getOrElse(""))) +
         DepNode.FieldSlot(i.id.owner, i.id.field)
     }.toSet
     // Drop degenerate owner-only slots (empty field) that carry no materialization meaning.
@@ -121,7 +121,7 @@ object FnDepGraphBuilder {
 
     // -- read-after-write fn -> fn edges (slot granularity + shape overlap) ------
     for (b <- inputs; a <- inputs) {
-      if (overlaps(b.sensitivity, a.sensitivity))
+      if (overlaps(b.read, a.write))
         edges += DepEdge(DepNode.Fn(b.id), DepNode.Fn(a.id), DepKind.ReadAfter)
     }
 
@@ -143,7 +143,7 @@ object FnDepGraphBuilder {
     for (a <- inputs; s <- slotNode(a.id.owner, a.id.field).toList) {
       edges += DepEdge(s, DepNode.Fn(a.id), DepKind.SlotMaterialization)
     }
-    for (b <- inputs; r <- b.sensitivity.leafReads; s <- slotNode(r.owner, r.segments.headOption.getOrElse("")).toList) {
+    for (b <- inputs; r <- b.read.leafReads; s <- slotNode(r.root, r.headName.getOrElse("")).toList) {
       edges += DepEdge(DepNode.Fn(b.id), s, DepKind.SlotMaterialization)
     }
 
@@ -151,18 +151,18 @@ object FnDepGraphBuilder {
     kahn(allNodes, edges.toList).map(order => EmissionOrder(order, edges.toList))
   }
 
-  /** B reads something A writes: same slot (owner + head segment) or a shape overlap
+  /** B reads something A writes: same slot (root + head segment) or a shape overlap
     * (B's `shapeReads` holds an owner A writes to). `prevReads` count as reads.
     */
   private def overlaps(b: Sensitivity, a: Sensitivity): Boolean = {
-    val bReads = b.leafReads.map(slotKey) ++ b.prevReads.map(slotKey)
-    val aWrites = a.writes.map(slotKey)
+    val bReads = b.leafReads.map(slotKey) ++ b.prevReads.map(u => (u, None))
+    val aWrites = a.leafReads.map(slotKey)
     (bReads intersect aWrites).nonEmpty ||
-      b.shapeReads.exists(o => a.writes.exists(_.owner == o))
+      b.shapeReads.exists(o => a.leafReads.exists(_.root == o))
   }
 
   private def slotKey(p: SchemaPath): (TypeId.User, Option[String]) =
-    (p.owner, p.segments.headOption)
+    (p.root, p.headName)
 
   // -- deterministic Kahn ----------------------------------------------------------
 
