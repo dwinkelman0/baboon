@@ -4,7 +4,7 @@ import fastparse.*
 import io.septimalmind.baboon.parser.{ParserContext, model}
 import io.septimalmind.baboon.parser.defns.base.{DefDocs, Literals, idt, kw, struct}
 import io.septimalmind.baboon.parser.model.RawDtoMember.ContractRef
-import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, ExtractionKind, RawBody, RawCapture, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawFn, RawFnParam, RawIdentifier, RawLocatorSeg, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef, ScopedRef}
+import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, ExtractionKind, RawBody, RawCapture, RawCaptureStep, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawFn, RawFnParam, RawIdentifier, RawLocatorSeg, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef, ScopedRef}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.language.Quirks.Discarder
 
@@ -186,9 +186,14 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def capture[$: P]: P[RawCapture] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    (idt.symbol ~ ":" ~/ rootType ~ star.? ~ locator.?).map {
-      case (name, rt, s, loc) => RawCapture(name, rt, s, loc.getOrElse(Nil))
+    (idt.symbol ~ ":" ~/ rootType ~ captureStep.rep).map {
+      case (name, rt, path) => RawCapture(name, rt, path.toList)
     }
+  }
+
+  private def captureStep[$: P]: P[RawCaptureStep] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    star.map(RawCaptureStep.Star.apply) | step.map(RawCaptureStep.Single.apply)
   }
 
   private def rootType[$: P]: P[RawTypeRef] = {
@@ -210,11 +215,6 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
     P("." ~/ idt.symbol).map(RawLocatorSeg.Field.apply) |
     P("[" ~/ "$" ~ idt.symbol ~ "]").map(RawLocatorSeg.Key.apply)
-  }
-
-  private def locator[$: P]: P[List[RawLocatorSeg]] = {
-    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    step.rep.map(_.toList)
   }
 
   private def param[$: P]: P[RawFnParam] = {
