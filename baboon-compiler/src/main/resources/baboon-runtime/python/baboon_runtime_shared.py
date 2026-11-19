@@ -887,6 +887,42 @@ def assert_trace(cond, vars_dict=None, msg=None):
     return True
 
 
+def baboon_match_variant(value, cls):
+    """Baboon fn `match` runtime hook (cf. statement lowering in PyDefnTranslator).
+
+    True when `value` is of ADT branch type `cls`: either a live instance or the
+    single-key wrapped wire-dict form (``{"Branch": {...}}``) the ADT JSON codec emits.
+    """
+    if isinstance(value, cls):
+        return True
+    if isinstance(value, dict) and len(value) == 1:
+        tag = next(iter(value))
+        if tag == cls.__name__:
+            return True
+        ident = getattr(cls, "baboon_adt_type_identifier", None)
+        return tag == ident
+    return False
+
+
+def baboon_variant_value(value, cls):
+    """Baboon fn `match` runtime hook: extracts the bound payload of branch type `cls`.
+
+    Instances pass through; single-key wire dicts are validated into `cls` when they
+    carry a mapping payload, otherwise the raw payload is returned. Anything else is
+    a decoder failure (the guard above should have filtered it out).
+    """
+    if isinstance(value, cls):
+        return value
+    if isinstance(value, dict) and len(value) == 1:
+        inner = next(iter(value.values()))
+        if isinstance(inner, dict) and hasattr(cls, "model_validate"):
+            return cls.model_validate(inner)
+        return inner
+    raise BaboonCodecException.DecoderFailure(
+        f"baboon match: value {value!r} is not a {getattr(cls, '__name__', cls)}"
+    )
+
+
 def baboon_unmodified_since_version(g: BaboonGenerated) -> str:
     return g.baboon_same_in_versions[0]
 

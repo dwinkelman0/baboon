@@ -122,6 +122,10 @@ object PyTypes {
   val pyInt64FromJson = PyType(pyBaboonSharedRuntimeModule, "int64_from_json")
   // Baboon fn `assert` runtime hook (cf. `@default(fn)` lowering in PyDefnTranslator).
   val pyAssertTrace = PyType(pyBaboonSharedRuntimeModule, "assert_trace")
+  // Baboon fn `match` runtime hooks: variant check + payload extraction for
+  // ADT branch classes (also tolerant of the single-key wrapped wire-dict form).
+  val pyBaboonMatchVariant = PyType(pyBaboonSharedRuntimeModule, "baboon_match_variant")
+  val pyBaboonVariantValue = PyType(pyBaboonSharedRuntimeModule, "baboon_variant_value")
   val pyFloat        = PyType(pyBuiltins, "float")
   val pyDecimal      = PyType(pyDecimalModule, "Decimal")
   val pyBool         = PyType(pyBuiltins, "bool")

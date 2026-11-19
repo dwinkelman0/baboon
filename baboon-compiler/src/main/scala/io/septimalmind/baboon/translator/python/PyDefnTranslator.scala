@@ -228,7 +228,8 @@ object PyDefnTranslator {
           val dtoContractsDefs = dtoContracts.flatMap(domain.defs.meta.nodes.get).collect { case DomainMember.User(_, c: Typedef.Contract, _, _) => c }
           val contractsFields  = dtoContractsDefs.flatMap(_.fields)
 
-          val dtoFieldsTrees = genDtoFields(dto.fields, contractsFields.toSet)
+          val dtoLowering    = genDtoFields(dto, contractsFields.toSet)
+          val dtoFieldsTrees = dtoLowering.fields
           val dtoProperties  = genDtoProperties(contractsFields)
 
           val contractParents = dto.contracts.toSeq
@@ -268,12 +269,20 @@ object PyDefnTranslator {
           val classDocTree: Option[TextTree[PyValue]] =
             if (classDocstring.isEmpty) None else Some(q"$classDocstring")
 
+          // Statement-bodied fns (`let`/loops/`match` defaults, `@normalize`
+          // validators, computed `@property`s) append extra class members here.
+          // Empty in the common case so output for fn-free DTOs is unchanged.
+          val fnMembers =
+            if (dtoLowering.classMembers.isEmpty) None
+            else Some(dtoLowering.classMembers.joinN())
+
           val members =
             List(
               classDocTree,
               Some(dtoFieldsTrees.joinN()),
               Some(modelConfig),
               dtoProperties.map(_.joinN()),
+              fnMembers,
               Some(mainMeta.joinN()),
               identifierRepr,
             ).flatten
@@ -283,13 +292,24 @@ object PyDefnTranslator {
                |    ${members.joinNN().shift(4).trim}
                |""".stripMargin
 
+          // Module-level helpers for statement-bodied fns (`@default` helpers,
+          // `@migrate` version functions) are emitted ahead of the class.
+          // Empty in the common case so output for fn-free DTOs is unchanged.
+          val withHelpers =
+            if (dtoLowering.moduleHelpers.isEmpty) classTree
+            else
+              q"""${dtoLowering.moduleHelpers.joinNN()}
+                 |
+                 |$classTree
+                 |""".stripMargin
+
           val combined = identifierCodec match {
             case Some(codecTree) =>
-              q"""$classTree
+              q"""$withHelpers
                  |
                  |$codecTree
                  |""".stripMargin
-            case None => classTree
+            case None => withHelpers
           }
 
           PyDefnRepr(combined, List.empty)
@@ -541,39 +561,77 @@ object PyDefnTranslator {
       }
     }
 
-    private def genDtoFields(dtoFields: List[Field], contractsFields: Set[Field]): List[TextTree[PyValue]] = {
-      // `normalize`/`migrate`/`computed` have no Python lowering yet; fail
-      // with a clear per-backend error instead of silently dropping them.
-      dtoFields.foreach { f =>
-        if (f.normalize.isDefined)
-          sys.error(s"normalize fn on field `${f.name.name}` is not yet lowered for the python backend")
-        if (f.migrate.isDefined)
-          sys.error(s"migrate fn on field `${f.name.name}` is not yet lowered for the python backend")
-        if (f.computed.isDefined)
-          sys.error(s"computed fn on field `${f.name.name}` is not yet lowered for the python backend")
-      }
-      val fields = dtoFields.map {
+    private final case class DtoFnLowering(
+      fields: List[TextTree[PyValue]],
+      classMembers: List[TextTree[PyValue]],
+      moduleHelpers: List[TextTree[PyValue]],
+    )
+
+    private def genDtoFields(dto: Typedef.Dto, contractsFields: Set[Field]): DtoFnLowering = {
+      val className     = dto.id.name.name.capitalize
+      val classMembers  = List.newBuilder[TextTree[PyValue]]
+      val moduleHelpers = List.newBuilder[TextTree[PyValue]]
+      val fields = dto.fields.flatMap {
         field =>
-          val plan      = PyFieldPlan(field, contractsFields.contains(field))
-          val fieldName = plan.wireName
-          val fieldType = domainTypes.asPyRef(field.tpe, fileTools.definitionsBasePkg)
-          val defaultValue = field.default.map(renderPyDefault(_, field))
-          // A trailing `_` suffix is needed when either the field is a Python keyword (PEP 8
-          // convention) or the field implements a contract abstract method (to avoid a Python
-          // name-clash with the @property accessor). In both cases a pydantic alias preserves the
-          // original model name as the wire key.
-          (plan.needsAlias, defaultValue) match {
-            case (true, Some(dv)) =>
-              q"${plan.attributeName}: $fieldType = $pydanticField(default=$dv, alias='$fieldName', serialization_alias='$fieldName')"
-            case (true, None) =>
-              q"${plan.attributeName}: $fieldType = $pydanticField(alias='$fieldName', serialization_alias='$fieldName')"
-            case (false, Some(dv)) =>
-              q"${plan.attributeName}: $fieldType = $dv"
-            case (false, None) =>
-              q"${plan.attributeName}: $fieldType"
+          // `computed` fields are no-storage: they are exposed as a read-only
+          // `@property` (see `renderPyComputedProperty`) and never become a
+          // pydantic field. The JSON/UEBA codecs already exclude them from
+          // the wire for the same reason.
+          field.computed match {
+            case Some(fn) =>
+              classMembers += renderPyComputedProperty(field, fn)
+              Nil
+            case None =>
+              val plan      = PyFieldPlan(field, contractsFields.contains(field))
+              val fieldName = plan.wireName
+              val fieldType = domainTypes.asPyRef(field.tpe, fileTools.definitionsBasePkg)
+              val defaultLowering = field.default.map(renderPyDefault(_, className, field))
+              defaultLowering.foreach(d => moduleHelpers ++= d.helpers)
+              // Statement-bodied `@default(fn)` lowers to a module-level
+              // helper: zero-arg helpers plug into `default_factory=`, while a
+              // present capture root keeps the lambda-argument shape of the
+              // pure path by wrapping the helper call.
+              val defaultFactory = defaultLowering.flatMap(_.factory)
+              val defaultValue   = defaultLowering.map(_.tree).filter(_ => defaultFactory.isEmpty)
+              val fieldTree = (plan.needsAlias, defaultValue, defaultFactory) match {
+                case (true, _, Some(PyDefaultFactory(helper, Nil))) =>
+                  q"${plan.attributeName}: $fieldType = $pydanticField(default_factory=$helper, alias='$fieldName', serialization_alias='$fieldName')"
+                case (false, _, Some(PyDefaultFactory(helper, Nil))) =>
+                  q"${plan.attributeName}: $fieldType = $pydanticField(default_factory=$helper)"
+                case (_, _, Some(PyDefaultFactory(helper, args))) =>
+                  val callArgs = args.map(escapePyKeyword).mkString(", ")
+                  val wrapped  = q"(lambda $callArgs: $helper($callArgs))"
+                  if (plan.needsAlias)
+                    q"${plan.attributeName}: $fieldType = $pydanticField(default=$wrapped, alias='$fieldName', serialization_alias='$fieldName')"
+                  else
+                    q"${plan.attributeName}: $fieldType = $wrapped"
+                case (true, Some(dv), None) =>
+                  q"${plan.attributeName}: $fieldType = $pydanticField(default=$dv, alias='$fieldName', serialization_alias='$fieldName')"
+                case (true, None, None) =>
+                  q"${plan.attributeName}: $fieldType = $pydanticField(alias='$fieldName', serialization_alias='$fieldName')"
+                case (false, Some(dv), None) =>
+                  q"${plan.attributeName}: $fieldType = $dv"
+                case (false, None, None) =>
+                  q"${plan.attributeName}: $fieldType"
+              }
+              // `@normalize` runs as a post-init/read hook after construction
+              // (see `renderPyNormalizeValidator`). Nested DTOs validate (and
+              // normalize) themselves before the parent's hook runs, so
+              // children are normalized bottom-up first, structurally.
+              field.normalize.foreach {
+                nfn => classMembers += renderPyNormalizeValidator(field, plan, nfn)
+              }
+              field.migrate.foreach {
+                m => moduleHelpers += renderPyMigrateFn(className, field, m)
+              }
+              List(fieldTree)
           }
       }
-      if (fields.isEmpty) List(q"pass") else fields
+      DtoFnLowering(
+        fields = if (fields.isEmpty) List(q"pass") else fields,
+        classMembers = classMembers.result(),
+        moduleHelpers = moduleHelpers.result(),
+      )
     }
 
     private def renderPyString(s: String): String = {
@@ -588,30 +646,38 @@ object PyDefnTranslator {
       s"\"$escaped\""
     }
 
-    private def renderPyDefault(fd: FieldDefault, field: Field): TextTree[PyValue] = {
+    private final case class PyDefaultFactory(helperName: String, captureArgs: List[String])
+    private final case class PyDefaultLowering(
+      tree: TextTree[PyValue],
+      helpers: List[TextTree[PyValue]],
+      factory: Option[PyDefaultFactory] = None,
+    )
+
+    private def renderPyDefault(fd: FieldDefault, ownerClass: String, field: Field): PyDefaultLowering = {
+      def leaf(tree: TextTree[PyValue]): PyDefaultLowering = PyDefaultLowering(tree, Nil)
       fd match {
         case FieldDefault.IntVal(_, raw, _) =>
-          q"$raw"
+          leaf(q"$raw")
         case FieldDefault.FloatVal(_, raw) =>
-          q"$raw"
-        case FieldDefault.BoolVal(true)  => q"True"
-        case FieldDefault.BoolVal(false) => q"False"
+          leaf(q"$raw")
+        case FieldDefault.BoolVal(true)  => leaf(q"True")
+        case FieldDefault.BoolVal(false) => leaf(q"False")
         case FieldDefault.StrVal(value) =>
-          q"${renderPyString(value)}"
+          leaf(q"${renderPyString(value)}")
         case FieldDefault.NullVal =>
-          q"None"
+          leaf(q"None")
         case FieldDefault.EnumVal(memberName) =>
           val enumTpe     = domainTypes.asPyType(field.tpe.id, fileTools.definitionsBasePkg)
           val memberIdent = escapePyKeyword(memberName.split('.').last)
-          q"$enumTpe.$memberIdent"
+          leaf(q"$enumTpe.$memberIdent")
         case FieldDefault.SpecialFloatVal(kind) =>
           kind match {
-            case FieldDefault.SpecialFloatKind.NaN    => q"float('nan')"
-            case FieldDefault.SpecialFloatKind.PosInf => q"float('inf')"
-            case FieldDefault.SpecialFloatKind.NegInf => q"float('-inf')"
+            case FieldDefault.SpecialFloatKind.NaN    => leaf(q"float('nan')")
+            case FieldDefault.SpecialFloatKind.PosInf => leaf(q"float('inf')")
+            case FieldDefault.SpecialFloatKind.NegInf => leaf(q"float('-inf')")
           }
         case FieldDefault.Fn(fn) =>
-          renderPyDefaultFn(fn, field)
+          renderPyDefaultFn(fn, ownerClass, field)
       }
     }
 
@@ -624,7 +690,7 @@ object PyDefnTranslator {
     // variables, non-leaf types) is a clear per-backend error. Other backends
     // keep their own not-yet-lowered error. `normalize`/`migrate`/`computed`
     // are rejected in `genDtoFields`.
-    private def renderPyDefaultFn(fn: TypedFn, field: Field): TextTree[PyValue] = {
+    private def renderPyDefaultFn(fn: TypedFn, ownerClass: String, field: Field): PyDefaultLowering = {
       def err(what: String): Nothing =
         sys.error(s"@default(fn) for field `${field.name.name}`: $what is not yet lowered for the python backend")
       fn.expected match {
@@ -635,30 +701,40 @@ object PyDefnTranslator {
         case io.septimalmind.baboon.typer.model.TypedStmt.Assert(_) => false
         case _                                                      => true
       }
-      if (nonAssertStmts.nonEmpty) {
-        val kinds = nonAssertStmts.map {
-          case io.septimalmind.baboon.typer.model.TypedStmt.Let(_, _, _) => "let"
-          case io.septimalmind.baboon.typer.model.TypedStmt.Effect(expr) =>
-            expr match {
-              case io.septimalmind.baboon.typer.model.TypedExpr.Assign(_, _, _) => "assign"
-              case io.septimalmind.baboon.typer.model.TypedExpr.ForIn(_, _, _, _) => "loop"
-              case io.septimalmind.baboon.typer.model.TypedExpr.ForC(_, _, _, _, _) => "loop"
-              case io.septimalmind.baboon.typer.model.TypedExpr.Match(_, _, _) => "match"
-              case io.septimalmind.baboon.typer.model.TypedExpr.Block(_, _, _) => "block"
-              case _ => "statement"
-            }
-          case io.septimalmind.baboon.typer.model.TypedStmt.Assert(_) => "assert"
-        }.distinct.mkString("/")
-        err(s"statement bodies ($kinds — only assert statements are lowered; let/assign/loop/match are)")
+      if (nonAssertStmts.isEmpty) {
+        val argNames = fn.capture.map(_.name).toList
+        val result   = renderPyFnExpr(fn.body.result, argNames, field)
+        val asserts  = fn.body.assertions.map(a => renderPyAssertTrace(a, argNames, field))
+        val body =
+          if (asserts.isEmpty) result
+          else q"(${(asserts :+ result).join(", ")})[-1]"
+        val tree =
+          if (argNames.isEmpty) q"(lambda: $body)()"
+          else q"(lambda ${argNames.map(escapePyKeyword).mkString(", ")}: $body)"
+        PyDefaultLowering(tree, Nil)
+      } else {
+        // Statement bodies (`let`, assignment, loops, `match`, blocks) cannot
+        // fit in an inline lambda, so they lower to a module-level helper
+        // function with real statements; the expression result is kept as the
+        // final `return` value. Zero-arg helpers are referenced through
+        // `Field(default_factory=...)`; a present capture root keeps the
+        // lambda-argument shape of the pure path by wrapping the helper call.
+        val fieldType = domainTypes.asPyRef(field.tpe, fileTools.definitionsBasePkg)
+        val argNames  = fn.capture.map(_.name).toList
+        val helperName = s"_baboon_default_${ownerClass}_${field.name.name}"
+        val lowering   = new PyFnStmtLowering(field, "@default(fn)")
+        val (stmtLines, result) = lowering.lowerFn(fn, argNames, Nil)
+        val allLines = stmtLines :+ q"return $result"
+        val helperArgs = argNames.map(escapePyKeyword).mkString(", ")
+        val helper =
+          q"""def $helperName($helperArgs) -> $fieldType:
+             |    ${allLines.joinN().shift(4).trim}
+             |""".stripMargin
+        // The inner default expression is unused on this path (`genDtoFields`
+        // renders `default_factory=` / a wrapping lambda from `factory`);
+        // keep a placeholder so `tree` stays total.
+        PyDefaultLowering(q"None", List(helper), Some(PyDefaultFactory(helperName, argNames)))
       }
-      val argNames = fn.capture.map(_.name).toList
-      val result   = renderPyFnExpr(fn.body.result, argNames, field)
-      val asserts  = fn.body.assertions.map(a => renderPyAssertTrace(a, argNames, field))
-      val body =
-        if (asserts.isEmpty) result
-        else q"(${(asserts :+ result).join(", ")})[-1]"
-      if (argNames.isEmpty) q"(lambda: $body)()"
-      else q"(lambda ${argNames.map(escapePyKeyword).mkString(", ")}: $body)"
     }
 
     private def renderPyFnExpr(expr: TypedExpr, args: List[String], field: Field): TextTree[PyValue] = {
@@ -746,6 +822,282 @@ object PyDefnTranslator {
         assert.capturedVars.distinct.map(v => s"'$v': ${escapePyKeyword(v)}").mkString("{", ", ", "}")
       val msg = assert.msg.map(m => renderPyFnExpr(m, args, field)).getOrElse(q"None")
       q"$pyAssertTrace($cond, $vars, $msg)"
+    }
+
+    // Full statement lowering for context fns (statement-bodied `@default`,
+    // `@normalize`, `@migrate`, computed). Pure expressions reuse
+    // `renderPyFnExpr` so leaf rendering stays identical; everything else
+    // lowers to explicit statements while the expression result is kept as
+    // the final value (`return` / temp assignment). One instance per fn:
+    // `scope` accumulates `let`/loop/match bindings for the same free-variable
+    // check the pure path performs, `counter` mints fresh temp names.
+    private final class PyFnStmtLowering(field: Field, role: String) {
+      private var scope: List[String] = Nil
+      private var counter: Int        = 0
+      private def err(what: String): Nothing =
+        sys.error(s"$role for field `${field.name.name}`: $what is not yet lowered for the python backend")
+
+      private def fresh(prefix: String): String = {
+        val id = counter
+        counter += 1
+        s"_baboon_${prefix}_$id"
+      }
+
+      private def bind(name: String): Unit =
+        if (!scope.contains(name)) scope = scope :+ name
+
+      def lowerFn(
+        fn: TypedFn,
+        initialScope: List[String],
+        prelude: List[TextTree[PyValue]],
+      ): (List[TextTree[PyValue]], TextTree[PyValue]) = {
+        scope = initialScope
+        counter = 0
+        val head = prelude ++ lowerStmtList(fn.body.stmts)
+        val (valueLines, result) = lowerValue(fn.body.result)
+        (head ++ valueLines, result)
+      }
+
+      private def lowerStmtList(stmts: List[TypedStmt]): List[TextTree[PyValue]] =
+        stmts.flatMap(lowerStmt)
+
+      private def lowerStmt(stmt: TypedStmt): List[TextTree[PyValue]] = stmt match {
+        case TypedStmt.Let(name, _, value) =>
+          val (lines, expr) = lowerValue(value)
+          bind(name)
+          lines :+ q"${escapePyKeyword(name)} = $expr"
+        case TypedStmt.Effect(expr) => lowerStmtExpr(expr)
+        case TypedStmt.Assert(a)    => List(renderPyAssertTrace(a, scope, field))
+      }
+
+      private def lowerStmtExpr(expr: TypedExpr): List[TextTree[PyValue]] = expr match {
+        case a: TypedExpr.Assign => lowerAssign(a)._1
+        case f: TypedExpr.ForIn  => renderForIn(f)
+        case f: TypedExpr.ForC   => renderForC(f)
+        case m: TypedExpr.Match  => renderMatch(m, needValue = false)._1
+        case b: TypedExpr.Block  => lowerStmtList(b.stmts) ++ b.value.toList.flatMap(lowerStmtExpr)
+        case other               => List(renderPyFnExpr(other, scope, field))
+      }
+
+      private def lowerValue(expr: TypedExpr): (List[TextTree[PyValue]], TextTree[PyValue]) = expr match {
+        case a: TypedExpr.Assign => lowerAssign(a)
+        case m: TypedExpr.Match  => renderMatch(m, needValue = true)
+        case b: TypedExpr.Block  =>
+          val head = lowerStmtList(b.stmts)
+          b.value match {
+            case Some(v) =>
+              val (vLines, r) = lowerValue(v)
+              (head ++ vLines, r)
+            case None => err("block without a value in value position")
+          }
+        case i: TypedExpr.If if !isPureExpr(i) => renderIfValue(i)
+        case _: TypedExpr.ForIn                => err("loop in value position")
+        case _: TypedExpr.ForC                 => err("loop in value position")
+        case other                             => (Nil, renderPyFnExpr(other, scope, field))
+      }
+
+      private def isPureExpr(expr: TypedExpr): Boolean = expr match {
+        case _: TypedExpr.Lit  => true
+        case _: TypedExpr.Path => true
+        case TypedExpr.Call(t, _, args, _)   => isPureExpr(t) && args.forall(isPureExpr)
+        case TypedExpr.BinOp(_, l, r, _)     => isPureExpr(l) && isPureExpr(r)
+        case TypedExpr.UnaryOp(_, e, _)       => isPureExpr(e)
+        case TypedExpr.If(c, t, e, _)         => isPureExpr(c) && isPureExpr(t) && isPureExpr(e)
+        case _                               => false
+      }
+
+      private def renderLValue(target: TypedExpr): TextTree[PyValue] = target match {
+        case TypedExpr.Path(root, segments, _) =>
+          if (!scope.contains(root)) err(s"free variable `$root` (only bound names are in scope)")
+          segments.foldLeft[TextTree[PyValue]](q"${escapePyKeyword(root)}") {
+            case (acc, TypedPathSeg.Field(name, _))  => q"$acc.${escapePyKeyword(name)}"
+            case (acc, TypedPathSeg.Index(index, _)) => q"$acc[${renderPyFnExpr(index, scope, field)}]"
+          }
+        case other => err(s"cannot assign to `${other.getClass.getSimpleName}`")
+      }
+
+      private def lowerAssign(a: TypedExpr.Assign): (List[TextTree[PyValue]], TextTree[PyValue]) = {
+        val (valueLines, rhs) = lowerValue(a.value)
+        val lval              = renderLValue(a.target)
+        (valueLines :+ q"$lval = $rhs", lval)
+      }
+
+      // `let total = 0; for (i = 0; i < 10; i = i + 1) { total = total + i; }`
+      // lowers to a `for ... in ...:` loop over the iterable.
+      private def renderForIn(f: TypedExpr.ForIn): List[TextTree[PyValue]] = {
+        val (iterLines, iter) = lowerValue(f.iterable)
+        bind(f.varName)
+        val bodyLines = lowerStmtList(f.body.stmts) ++ f.body.value.toList.flatMap(lowerStmtExpr)
+        val body      = if (bodyLines.isEmpty) q"pass" else bodyLines.joinN()
+        iterLines :+ q"""for ${escapePyKeyword(f.varName)} in $iter:
+                        |    ${body.shift(4).trim}""".stripMargin
+      }
+
+      // C-style `for (i = 0; i < 10; i = i + 1) { ... }` lowers to the
+      // equivalent `while` loop: init, condition, body, step-as-statement.
+      // Appending the step after the body is sound: the language has no
+      // `break`/`continue`, so the step always executes exactly once per
+      // iteration, in order.
+      private def renderForC(f: TypedExpr.ForC): List[TextTree[PyValue]] = {
+        val (initLines, initV) = lowerValue(f.init.value)
+        bind(f.init.name)
+        val initLine = q"${escapePyKeyword(f.init.name)} = $initV"
+        val (condLines, cond) = lowerValue(f.cond)
+        val stepLines         = lowerStmtExpr(f.step)
+        val bodyLines         = lowerStmtList(f.body.stmts) ++ f.body.value.toList.flatMap(lowerStmtExpr)
+        val loopLines         = bodyLines ++ stepLines
+        val loopBody          = if (loopLines.isEmpty) q"pass" else loopLines.joinN()
+        val loop = q"""while $cond:
+                      |    ${loopBody.shift(4).trim}""".stripMargin
+        initLines ++ List(initLine) ++ condLines ++ List(loop)
+      }
+
+      // `match` lowers to an `if`/`elif`/`else` chain on a scrutinee temp
+      // (evaluated once). In value position every arm assigns a shared result
+      // temp which becomes the expression result; in statement position arm
+      // values are emitted as bare expression statements. `opt` scrutinees
+      // match `Some(x)`/`None` directly; ADT scrutinees dispatch through the
+      // `baboon_match_variant`/`baboon_variant_value` runtime hooks (tolerant
+      // of the single-key wrapped wire form). A trailing wildcard becomes
+      // `else`; without one the chain ends in an exhaustiveness raise.
+      private def renderMatch(m: TypedExpr.Match, needValue: Boolean): (List[TextTree[PyValue]], TextTree[PyValue]) = {
+        val (scrutLines, scrut) = lowerValue(m.scrutinee)
+        val scrutVar            = fresh("match")
+        val armValues           = m.arms.map(_.body.value)
+        // The shared result temp is only needed when the match itself is a
+        // value; in statement position arm values lower to bare statements.
+        val resVar: Option[String] =
+          if (needValue && armValues.exists(_.isDefined)) Some(fresh("match_value")) else None
+        if (needValue && resVar.isEmpty)
+          err("match without arm values in value position")
+        val clauses = m.arms.zipWithIndex.map {
+          case (arm, idx) =>
+            val (keyword, check) = arm.pattern match {
+              case TypedPattern.Wildcard =>
+                if (idx != m.arms.size - 1) err("unreachable match arm after `else`")
+                ("else", None)
+              case TypedPattern.Variant(name, binding, _) =>
+                val kw = if (idx == 0) "if" else "elif"
+                (kw, Some(matchCheck(m.scrutinee.tpe, scrutVar, name, binding)))
+            }
+            val bindLine = arm.pattern match {
+              case TypedPattern.Variant(name, Some(b), _) =>
+                bind(b)
+                if (FnTypes.isOpt(m.scrutinee.tpe)) List(q"${escapePyKeyword(b)} = $scrutVar": TextTree[PyValue])
+                else List(q"${escapePyKeyword(b)} = $pyBaboonVariantValue($scrutVar, ${name.capitalize})": TextTree[PyValue])
+              case _ => Nil
+            }
+            val armLines = bindLine ++ lowerStmtList(arm.body.stmts) ++ (arm.body.value match {
+              case Some(v) if needValue && resVar.isDefined =>
+                val (vl, r) = lowerValue(v)
+                vl :+ q"${resVar.get} = $r"
+              case Some(v) =>
+                lowerStmtExpr(v)
+              case None =>
+                if (needValue) err("match arm without a value in value position")
+                else Nil
+            })
+            val bodyTree = if (armLines.isEmpty) q"pass" else armLines.joinN()
+            check match {
+              case Some(c) =>
+                q"""$keyword $c:
+                   |    ${bodyTree.shift(4).trim}""".stripMargin
+              case None =>
+                q"""else:
+                   |    ${bodyTree.shift(4).trim}""".stripMargin
+            }
+        }
+        val exhaustive = m.arms.lastOption.exists(_.pattern == TypedPattern.Wildcard)
+        val allClauses =
+          if (exhaustive) clauses
+          else clauses :+ q"""else:
+                              |    raise AssertionError("baboon match fell through (non-exhaustive arms)")""".stripMargin
+        val lines = scrutLines ++ List(q"$scrutVar = $scrut": TextTree[PyValue]) ++ allClauses
+        (lines, resVar.map(r => q"$r": TextTree[PyValue]).getOrElse(q"None"))
+      }
+
+      private def matchCheck(scrutTpe: TypeRef, scrutVar: String, name: String, binding: Option[String]): TextTree[PyValue] = {
+        if (FnTypes.isOpt(scrutTpe)) name match {
+          case "Some" => q"$scrutVar is not None"
+          case "None" =>
+            if (binding.isDefined) err("`None` match arm cannot bind a value")
+            q"$scrutVar is None"
+          case other => err(s"unknown option variant `$other`")
+        } else scrutTpe match {
+          case TypeRef.Scalar(_: TypeId.User) =>
+            q"$pyBaboonMatchVariant($scrutVar, ${name.capitalize})"
+          case _ =>
+            err(s"match on non-variant type `$scrutTpe`")
+        }
+      }
+
+      private def renderIfValue(i: TypedExpr.If): (List[TextTree[PyValue]], TextTree[PyValue]) = {
+        val (condLines, cond) = lowerValue(i.cond)
+        val resVar            = fresh("if")
+        val (thenLines, thenV) = lowerValue(i.thenE)
+        val (elseLines, elseV) = lowerValue(i.elseE)
+        val tree =
+          q"""if $cond:
+             |    ${(thenLines :+ q"$resVar = $thenV").joinN().shift(4).trim}
+             |else:
+             |    ${(elseLines :+ q"$resVar = $elseV").joinN().shift(4).trim}""".stripMargin
+        (condLines :+ tree, q"$resVar")
+      }
+    }
+
+    private def renderPyNormalizeValidator(field: Field, plan: PyFieldPlan, fn: TypedFn): TextTree[PyValue] = {
+      // `@normalize(fn)` runs after construction as a pydantic `mode="after"`
+      // validator: the capture root (when present and not `self` itself) is
+      // bound to the pre-normalize field value, `self` is the model under
+      // validation, and the fn result is written back with
+      // `object.__setattr__` (models are frozen, so plain assignment is
+      // rejected). Nested models validate — and normalize — before the
+      // parent's hook runs, giving bottom-up ordering structurally.
+      val lowering = new PyFnStmtLowering(field, "@normalize(fn)")
+      val bindCapture = fn.capture.map(_.name).filterNot(_ == "self").toList.map {
+        cap => q"${escapePyKeyword(cap)} = self.${plan.attributeName}"
+      }
+      val (stmtLines, result) = lowering.lowerFn(fn, "self" :: fn.capture.map(_.name).toList, bindCapture)
+      val attr = plan.attributeName
+      q"""@$pydanticModelValidator(mode="after")
+         |def _baboon_normalize_${field.name.name}(self):
+         |    ${(stmtLines :+ q"object.__setattr__(self, '$attr', $result)" :+ q"return self").joinN().shift(4).trim}
+         |""".stripMargin
+    }
+
+    private def renderPyComputedProperty(field: Field, fn: TypedFn): TextTree[PyValue] = {
+      // `= fn` computed fields are no-storage: a read-only `@property` getter
+      // evaluated on read. The capture root (when present and not `self`
+      // itself) aliases the instance; the fn result is the property value.
+      // Computed fields never enter `__init__` or the wire codecs.
+      val lowering = new PyFnStmtLowering(field, "computed fn")
+      val tpe      = domainTypes.asPyRef(fn.expected, fileTools.definitionsBasePkg)
+      val propName = escapePyKeyword(field.name.name)
+      val bindCapture = fn.capture.map(_.name).filterNot(_ == "self").toList.map {
+        cap => q"${escapePyKeyword(cap)} = self"
+      }
+      val (stmtLines, result) = lowering.lowerFn(fn, "self" :: fn.capture.map(_.name).toList, bindCapture)
+      q"""@property
+         |def $propName(self) -> $tpe:
+         |    ${(stmtLines :+ q"return $result").joinN().shift(4).trim}
+         |""".stripMargin
+    }
+
+    private def renderPyMigrateFn(ownerClass: String, field: Field, m: TypedMigrate): TextTree[PyValue] = {
+      // `@migrate(fn, [...])` lowers to a module-level version function
+      // `migrate_<Class>_<field>(...)` taking the capture root (when present);
+      // the fn result is the migrated value. Evolution codecs invoke it when
+      // reading payloads written before this field's version.
+      val fn       = m.fn
+      val lowering = new PyFnStmtLowering(field, "@migrate(fn)")
+      val tpe      = domainTypes.asPyRef(fn.expected, fileTools.definitionsBasePkg)
+      val argNames = fn.capture.map(_.name).toList
+      val helperArgs = argNames.map(escapePyKeyword).mkString(", ")
+      val (stmtLines, result) = lowering.lowerFn(fn, argNames, Nil)
+      q"""def migrate_${ownerClass}_${field.name.name}($helperArgs) -> $tpe:
+         |    \"\"\"Baboon `@migrate` version function for field `${field.name.name}`.\"\"\"
+         |    ${(stmtLines :+ q"return $result").joinN().shift(4).trim}
+         |""".stripMargin
     }
 
     private def genDtoProperties(contractsFields: List[Field]): Option[List[TextTree[PyValue]]] = {
