@@ -600,6 +600,10 @@ object PyDefnTranslator {
             case FieldDefault.SpecialFloatKind.PosInf => q"float('inf')"
             case FieldDefault.SpecialFloatKind.NegInf => q"float('-inf')"
           }
+        // Unreachable until Fn is lowered for this backend (typer gates reject
+        // FieldDefault.Fn before backends run); kept exhaustive per P1.
+        case FieldDefault.Fn(_) =>
+          sys.error("FieldDefault.Fn defaults are not yet lowered for the python backend")
       }
     }
 

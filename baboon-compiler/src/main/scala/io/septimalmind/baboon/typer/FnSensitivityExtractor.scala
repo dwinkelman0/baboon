@@ -8,12 +8,16 @@ import scala.collection.mutable
 /** P4: sensitivity extraction for fn bodies (standalone; not yet wired into `BaboonTranslator`).
   *
   * Input: a P3 [[TypedBody]] plus the P2 [[TypedCapture]], the seed [[ScopeTable]] and the
-  * owning slot (the DTO field the fn is attached to). Output: a [[Sensitivity]] with leaf
-  * (field-level) reads, shape (collection/ADT-structure) reads, prev reads (always empty:
-  * `!old` has no AST representation and P2 resolves no prev bindings) and field writes.
+  * owning slot (the DTO field the fn is attached to). Output: a pair of canonical
+  * [[Sensitivity]] values — `read` (leaf field-level reads, shape reads and
+  * always-empty prev reads) and `write` (field writes as leaf paths plus the
+  * written owners as shape reads, so overlap checks stay purely on
+  * [[Sensitivity]]). The single-`isPrev`-flag [[SchemaPath]] and the
+  * owner-keyed `prevReads` live in the model; `!old` has no AST representation
+  * and P2 resolves no prev bindings, so prev reads can never arise.
   *
   * Reads: the body is walked recursively. A [[TypedExpr.Path]] rooted at a capture becomes a
-  * [[SchemaPath]] of capture-root owner + ordered capture fields + local segments; a path
+  * [[SchemaPath]] of capture-root owner + ordered capture steps + local segments; a path
   * rooted at the `self` param becomes the owning DTO slot; a path rooted at a `let` propagates
   * that let's reads (extended with any further segments). Index expressions, for-iterables,
   * match scrutinees, assert/if conditions and call arguments are all recursed into.
@@ -26,28 +30,17 @@ import scala.collection.mutable
   * owner ([[structWrites]]). Locals (`let`s, for binders, match bindings) are never field
   * writes: assigning to one is ignored, never an error.
   *
-  * Checks: every produced [[SchemaPath]] is re-validated against the schema, `isPrev` is
-  * asserted false (prev reads can never arise), and assigning through an unknown root fails.
+  * Checks: every produced [[SchemaPath]] is re-validated against the schema (construction
+  * already resolves, so validation is a safety net with identical messages).
+  * Assigning through an unknown root fails.
   */
 object FnSensitivityExtractor {
 
   /** The field slot a fn is attached to (e.g. `Child.count` for a `default` fn on `count`). */
   final case class Slot(owner: TypeId.User, field: String) {
-    def path: SchemaPath = SchemaPath(owner, List(field))
+    def resolve(schema: FnSchema): Either[String, SchemaPath] =
+      SchemaPath.resolve(owner, List(field), schema)
   }
-
-  /** A leaf read/write: the owning DTO plus the field chain selected from it. */
-  final case class SchemaPath(owner: TypeId.User, segments: List[String]) {
-    def render: String = (owner.name.name :: segments).mkString(".")
-  }
-
-  /** Extracted sensitivity for one fn site. */
-  final case class Sensitivity(
-    leafReads: Set[SchemaPath],
-    shapeReads: Set[TypeId.User],
-    prevReads: Set[SchemaPath],
-    writes: Set[SchemaPath]
-  )
 
   def extract(
     body: TypedBody,
@@ -55,14 +48,14 @@ object FnSensitivityExtractor {
     scope: ScopeTable,
     schema: FnSchema,
     attachment: Slot
-  ): Either[List[String], Sensitivity] =
+  ): Either[List[String], (Sensitivity, Sensitivity)] =
     new Run(capture, scope, schema, attachment).run(body)
 
   /** Struct-literal write expansion: materialising a whole `owner` record writes every field. */
   def structWrites(owner: TypeId.User, schema: FnSchema): List[SchemaPath] =
     dtoFields(TypeRef.Scalar(owner), schema)
       .getOrElse(Nil)
-      .map(f => SchemaPath(owner, List(f.name.name)))
+      .map(f => SchemaPath(owner, isPrev = false, List(SchemaStep.FieldStep(f.name, owner, f.tpe))))
 
   // -- driver ---------------------------------------------------------------
 
@@ -88,22 +81,23 @@ object FnSensitivityExtractor {
     private type LeafB  = mutable.Set[SchemaPath]
     private type ShapeB = mutable.Set[TypeId.User]
 
-    def run(body: TypedBody): Either[List[String], Sensitivity] = {
+    def run(body: TypedBody): Either[List[String], (Sensitivity, Sensitivity)] = {
       val leafB: LeafB   = mutable.LinkedHashSet.empty
       val shapeB: ShapeB = mutable.LinkedHashSet.empty
       var ctx            = Ctx(baseScope, Map.empty)
       body.stmts.foreach(s => ctx = stmt(s, ctx, Set.empty, leafB, shapeB))
       expr(body.result, ctx, Set.empty, leafB, shapeB)
       // The attachment slot is always written, then every produced path is re-validated.
-      writes += attachment.path
+      attachment.resolve(schema) match {
+        case Right(p) => writes += p
+        case Left(m)  => errors += m
+      }
       (leafB.toSet ++ writes.toSet).foreach(validate)
       if (errors.nonEmpty) Left(errors.toList.distinct)
       else {
-        val out = Sensitivity(leafB.toSet, shapeB.toSet, Set.empty, writes.toSet)
-        // `isPrev` has no AST representation and P2 resolves no prev bindings,
-        // so prev reads can never arise; assert the invariant explicitly.
-        if (out.prevReads.nonEmpty) Left(List("prev reads are not supported (isPrev must be false)"))
-        else Right(out)
+        val read  = Sensitivity(leafB.toSet, shapeB.toSet, Set.empty)
+        val write = Sensitivity(writes.toSet, writes.toSet.map((p: SchemaPath) => p.root), Set.empty)
+        Right((read, write))
       }
     }
 
@@ -165,7 +159,7 @@ object FnSensitivityExtractor {
           leafB ++= tmpL
           shapeB ++= tmpS
           // Iterating a collection inspects its shape: the owning DTOs plus the element owner.
-          tmpL.foreach(p => shapeB += p.owner)
+          tmpL.foreach(p => shapeB += p.root)
           shapeB ++= shapeOf(iterable.tpe)
           block(b, ctx.withBinder(varName, forBinderT(iterable.tpe).getOrElse(iterable.tpe)), visiting, leafB, shapeB)
         case TypedExpr.ForC(init, cond, step, b, _) =>
@@ -181,7 +175,7 @@ object FnSensitivityExtractor {
           leafB ++= tmpL
           shapeB ++= tmpS
           // Matching on an ADT/`opt` scrutinee inspects its shape.
-          tmpL.foreach(p => shapeB += p.owner)
+          tmpL.foreach(p => shapeB += p.root)
           shapeB ++= shapeOf(scr.tpe)
           arms.foreach { arm =>
             val actx = arm.pattern match {
@@ -210,7 +204,12 @@ object FnSensitivityExtractor {
         case TypedPathSeg.Index(idx, _) => expr(idx, ctx, visiting, leafB, shapeB)
         case TypedPathSeg.Field(_, _)   => ()
       }
-      val segFields = p.segments.collect { case TypedPathSeg.Field(n, _) => n }
+      val segNames = p.segments.collect { case TypedPathSeg.Field(n, _) => n }
+      def extendFrom(base: SchemaPath): Unit =
+        SchemaPath.extend(base, segNames, schema) match {
+          case Right(full) => add(full)
+          case Left(m)     => errors += m
+        }
       ctx.scope.get(p.root) match {
         case None =>
           errors += s"unknown slot: ${p.root}"
@@ -219,37 +218,37 @@ object FnSensitivityExtractor {
             case None =>
               errors += s"capture root `${p.root}` with no capture"
             case Some(c) =>
-              userOwner(c.rootType) match {
+              captureBase(c) match {
                 case None => ()
-                case Some(owner) =>
+                case Some((owner, base)) =>
                   if (isStarCapture(c)) shapeB += owner
-                  add(SchemaPath(owner, captureFields(c) ++ segFields))
+                  extendFrom(base)
               }
           }
         case Some(ScopeEntry.Param(t)) =>
           val owner = if (p.root == "self") Some(attachment.owner) else userOwner(t)
-          owner.foreach(o => if (segFields.nonEmpty) add(SchemaPath(o, segFields)))
+          owner.foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
         case Some(ScopeEntry.LetBinding(_)) if ctx.lets.contains(p.root) && !visiting.contains(p.root) =>
           // A `let` use propagates the let's reads, extended with any further segments.
           val tmpL: LeafB  = mutable.LinkedHashSet.empty
           val tmpS: ShapeB = mutable.LinkedHashSet.empty
           expr(ctx.lets(p.root), ctx, visiting + p.root, tmpL, tmpS)
-          tmpL.foreach(l => add(l.copy(segments = l.segments ++ segFields)))
+          tmpL.foreach(l => extendFrom(l))
           shapeB ++= tmpS
         case Some(ScopeEntry.LetBinding(t)) =>
-          userOwner(t).foreach(o => if (segFields.nonEmpty) add(SchemaPath(o, segFields)))
+          userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
         case Some(ScopeEntry.StarChain(_)) =>
           capture match {
             case None =>
               errors += s"star chain `${p.root}` with no capture"
             case Some(c) =>
-              starPrefix(c, p.root) match {
+              starBase(c, p.root) match {
                 case None =>
                   errors += s"unknown star chain: ${p.root}"
-                case Some((owner, prefix, sub)) =>
+                case Some((owner, base)) =>
                   // A star read yields the element leafs plus the collection shape.
                   shapeB += owner
-                  add(SchemaPath(owner, prefix ++ sub ++ segFields))
+                  extendFrom(base)
               }
           }
       }
@@ -287,7 +286,7 @@ object FnSensitivityExtractor {
                 writes ++= tmpL
                 shapeB ++= tmpS
                 // `map[k] = v` writes inspect the map shape as well as the slot.
-                tmpL.foreach(sp => if (hasMapField(sp)) shapeB += sp.owner)
+                tmpL.foreach(sp => if (hasMapField(sp)) shapeB += sp.root)
               }
           }
         case other =>
@@ -296,43 +295,22 @@ object FnSensitivityExtractor {
 
     // -- checks -------------------------------------------------------------
 
-    private def validate(sp: SchemaPath): Unit = {
-      if (schema.lookup(sp.owner.name.name).isEmpty)
-        errors += s"unknown type: ${sp.owner.name.name}"
-      else {
-        val init: Either[String, TypeRef] = Right(TypeRef.Scalar(sp.owner))
-        sp.segments.foldLeft(init) { (acc, seg) => acc.flatMap(t => stepField(t, seg)) } match {
-          case Left(m)  => errors += m
-          case Right(_) => ()
-        }
+    private def validate(sp: SchemaPath): Unit =
+      SchemaPath.resolve(sp.root, sp.fieldNames, schema) match {
+        case Left(m)  => errors += m
+        case Right(_) => ()
       }
-    }
-
-    private def stepField(cur: TypeRef, seg: String): Either[String, TypeRef] = {
-      val t = peelOpt(cur)
-      if (isLst(t) || isSet(t) || isMap(t)) {
-        elemType(t).toRight(s"cannot situate into $t").flatMap { et =>
-          dtoFields(et, schema).toRight(s"no fields on $et (field `$seg`)").flatMap { fs =>
-            fs.find(_.name.name == seg).toRight(s"unknown field `$seg` on $et").map(_.tpe)
-          }
-        }
-      } else {
-        dtoFields(t, schema).toRight(s"no fields on $t (field `$seg`)").flatMap { fs =>
-          fs.find(_.name.name == seg).toRight(s"unknown field `$seg` on $t").map(_.tpe)
-        }
-      }
-    }
 
     private def hasMapField(sp: SchemaPath): Boolean = {
-      if (schema.lookup(sp.owner.name.name).isEmpty) return false
-      var cur: TypeRef = TypeRef.Scalar(sp.owner)
+      if (schema.lookup(sp.root.name.name).isEmpty) return false
+      var cur: TypeRef = TypeRef.Scalar(sp.root)
       var found        = false
-      val it           = sp.segments.iterator
+      val it           = sp.fieldNames.iterator
       var ok           = true
       while (ok && !found && it.hasNext) {
-        stepField(cur, it.next()) match {
-          case Left(_)  => ok = false
-          case Right(n) => if (isMap(n)) found = true; cur = n
+        SchemaPath.stepField(cur, it.next(), schema) match {
+          case Left(_)       => ok = false
+          case Right((_, n)) => if (isMap(n)) found = true; cur = n
         }
       }
       found
@@ -344,6 +322,15 @@ object FnSensitivityExtractor {
       case TypeRef.Scalar(u: TypeId.User) => Some(u)
       case _                              => None
     }
+
+    private def ownerOfName(name: String): Option[TypeId.User] =
+      schema.lookup(name) match {
+        case Some(d: Typedef.Dto)      => Some(d.id)
+        case Some(e: Typedef.Enum)     => Some(e.id)
+        case Some(a: Typedef.Adt)      => Some(a.id)
+        case Some(c: Typedef.Contract) => Some(c.id)
+        case _                         => None
+      }
 
     private def shapeOf(t: TypeRef): Set[TypeId.User] = t match {
       case TypeRef.Scalar(u: TypeId.User) => Set(u)
@@ -369,16 +356,36 @@ object FnSensitivityExtractor {
         case _                            => false
       }
 
-    /** Ordered field names of a capture path: plain fields plus star-substep fields. */
-    private def captureFields(c: TypedCapture): List[String] =
-      c.path.flatMap {
-        case TypedCaptureStep.FieldStep(f, _, _)   => List(f)
-        case TypedCaptureStep.KeyStep(_, _)        => Nil
-        case TypedCaptureStep.StarStep(_, _, sub)  => sub.collect { case TypedCaptureStep.FieldStep(f, _, _) => f }
+    /** Ordered steps of a capture path: plain fields plus star-substep fields. */
+    private def captureSteps(c: TypedCapture): Option[List[SchemaStep]] = {
+      val out = List.newBuilder[SchemaStep]
+      var ok  = true
+      def fieldStep(f: String, owner: String, tpe: TypeRef): Unit =
+        ownerOfName(owner) match {
+          case Some(u) => out += SchemaStep.FieldStep(FieldName(f), u, tpe)
+          case None    => ok = false
+        }
+      c.path.foreach {
+        case TypedCaptureStep.FieldStep(f, o, t) => fieldStep(f, o, t)
+        case TypedCaptureStep.KeyStep(_, _)      => ()
+        case TypedCaptureStep.StarStep(_, _, sub) =>
+          sub.foreach {
+            case TypedCaptureStep.FieldStep(f, o, t) => fieldStep(f, o, t)
+            case _                                   => ()
+          }
+      }
+      if (ok) Some(out.result()) else None
+    }
+
+    private def captureBase(c: TypedCapture): Option[(TypeId.User, SchemaPath)] =
+      userOwner(c.rootType).flatMap { owner =>
+        captureSteps(c).map(steps => (owner, SchemaPath(owner, isPrev = false, steps)))
       }
 
-    /** Split a capture at a star chain: root owner, fields before the star, star-substep fields. */
-    private def starPrefix(c: TypedCapture, chain: String): Option[(TypeId.User, List[String], List[String])] =
+    /** Split a capture at a star chain: root owner plus the fields before the
+      * star and the star-substep fields, as a base path for extension.
+      */
+    private def starBase(c: TypedCapture, chain: String): Option[(TypeId.User, SchemaPath)] =
       userOwner(c.rootType).flatMap { owner =>
         val idx = c.path.indexWhere {
           case TypedCaptureStep.StarStep(ch, _, _) if ch == chain => true
@@ -386,21 +393,27 @@ object FnSensitivityExtractor {
         }
         if (idx < 0) None
         else {
-          val before = c.path.take(idx).flatMap {
-            case TypedCaptureStep.FieldStep(f, _, _) => List(f)
-            case _                                   => Nil
+          val out = List.newBuilder[SchemaStep]
+          var ok  = true
+          def fieldStep(f: String, o: String, t: TypeRef): Unit =
+            ownerOfName(o) match {
+              case Some(u) => out += SchemaStep.FieldStep(FieldName(f), u, t)
+              case None    => ok = false
+            }
+          c.path.take(idx).foreach {
+            case TypedCaptureStep.FieldStep(f, o, t) => fieldStep(f, o, t)
+            case _                                   => ()
           }
-          val sub = c.path(idx) match {
-            case TypedCaptureStep.StarStep(_, _, s) => s.collect { case TypedCaptureStep.FieldStep(f, _, _) => f }
-            case _                                 => Nil
+          c.path(idx) match {
+            case TypedCaptureStep.StarStep(_, _, s) =>
+              s.foreach {
+                case TypedCaptureStep.FieldStep(f, o, t) => fieldStep(f, o, t)
+                case _                                   => ()
+              }
+            case _ => ()
           }
-          Some((owner, before, sub))
+          if (ok) Some((owner, SchemaPath(owner, isPrev = false, out.result()))) else None
         }
       }
-
-    private def peelOpt(t: TypeRef): TypeRef = t match {
-      case x if isOpt(x) => elemType(x).map(peelOpt).getOrElse(x)
-      case x             => x
-    }
   }
 }

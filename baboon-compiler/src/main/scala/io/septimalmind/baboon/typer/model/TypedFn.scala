@@ -421,3 +421,19 @@ object FnTypes {
     }
   }
 }
+
+/** Validated-program fn node as stored on [[Field]] (`normalize` / `migrate` /
+  * `computed`) and in [[FieldDefault.Fn]].
+  *
+  * This is the model-level projection of the pipeline output
+  * (`FnPipeline.TypedFn` minus its site): the ordered capture, the typed body
+  * and the owning field's expected type. Sensitivity and ordering live in the
+  * pipeline program, not here.
+  */
+case class TypedFn(
+  capture: Option[TypedCapture],
+  body: TypedBody,
+  expected: TypeRef
+)
+
+case class TypedMigrate(fn: TypedFn)

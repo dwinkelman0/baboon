@@ -198,12 +198,15 @@ object Docs {
   val empty: Docs = Docs(None, None)
 }
 
-case class Field(name: FieldName, tpe: TypeRef, prevName: Option[FieldName], docs: Docs = Docs.empty, default: Option[FieldDefault] = None) {
+case class Field(name: FieldName, tpe: TypeRef, prevName: Option[FieldName], docs: Docs = Docs.empty, default: Option[FieldDefault] = None, normalize: Option[TypedFn] = None, migrate: Option[TypedMigrate] = None, computed: Option[TypedFn] = None) {
   override def toString: String = {
     val defaultPart = default.map(d => s" @default($d)").getOrElse("")
+    val normalizePart = normalize.map(_ => " @normalize(fn)").getOrElse("")
+    val migratePart = migrate.map(_ => " @migrate(fn)").getOrElse("")
+    val computedPart = computed.map(_ => " = fn(...)").getOrElse("")
     prevName match {
-      case Some(prev) => s"$name: $tpe$defaultPart was $prev"
-      case None       => s"$name: $tpe$defaultPart"
+      case Some(prev) => s"$name: $tpe$defaultPart$normalizePart$migratePart$computedPart was $prev"
+      case None       => s"$name: $tpe$defaultPart$normalizePart$migratePart$computedPart"
     }
   }
 }

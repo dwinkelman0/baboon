@@ -14,6 +14,7 @@ sealed trait FieldDefault {
         case FieldDefault.SpecialFloatKind.PosInf => "+inf"
         case FieldDefault.SpecialFloatKind.NegInf => "-inf"
       }
+    case FieldDefault.Fn(_) => "fn(...)"
   }
 }
 
@@ -33,6 +34,8 @@ object FieldDefault {
   }
 
   final case class SpecialFloatVal(kind: SpecialFloatKind) extends FieldDefault
+
+  final case class Fn(fn: TypedFn) extends FieldDefault
 
   private def renderString(s: String): String = {
     val escaped = s.flatMap {

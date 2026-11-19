@@ -918,6 +918,10 @@ object TsDefnTranslator {
             case FieldDefault.SpecialFloatKind.PosInf => q"Infinity"
             case FieldDefault.SpecialFloatKind.NegInf => q"-Infinity"
           }
+        // Unreachable until Fn is lowered for this backend (typer gates reject
+        // FieldDefault.Fn before backends run); kept exhaustive per P1.
+        case FieldDefault.Fn(_) =>
+          sys.error("FieldDefault.Fn defaults are not yet lowered for the typescript backend")
       }
     }
 
