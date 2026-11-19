@@ -4,7 +4,7 @@ import fastparse.*
 import io.septimalmind.baboon.parser.{ParserContext, model}
 import io.septimalmind.baboon.parser.defns.base.{DefDocs, Literals, idt, kw, struct}
 import io.septimalmind.baboon.parser.model.RawDtoMember.ContractRef
-import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, ExtractionKind, RawBody, RawCapture, RawCaptureStep, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawFn, RawFnParam, RawIdentifier, RawLocatorSeg, RawLookupScope, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef, ScopedRef}
+import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, BodyStmt, ExtractionKind, ForInit, MatchArm, MatchPattern, RawBody, RawCapture, RawCaptureStep, RawContractRef, RawDefaultValue, RawDocComment, RawDocs, RawDto, RawDtoMember, RawField, RawFieldName, RawFn, RawFnParam, RawIdentifier, RawLocatorSeg, RawLookupScope, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef, ScopedRef}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.language.Quirks.Discarder
 
@@ -234,12 +234,118 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def fnBody[$: P]: P[RawBody] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P("{" ~/ letStmt.rep ~ expr ~ "}").map { case (lets, result) => RawBody(lets.toList, result) }
+    P("{" ~/ stmt.rep ~ expr ~ "}").map { case (stmts, result) =>
+      val flat = stmts.toList
+      RawBody(flat.collect { case BodyStmt.Let(n, _, v) => (n, v) }, result, flat)
+    }
   }
 
-  private def letStmt[$: P]: P[(String, BodyExpr)] = {
+  private def stmt[$: P]: P[BodyStmt] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(kw.kw("let") ~/ idt.symbol ~ "=" ~/ expr ~ ";").map { case (name, e) => (name, e) }
+    P(forStmt | matchStmt | letStmt | assignStmt)
+  }
+
+  private def letStmt[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(kw.kw("let") ~/ idt.symbol ~ (":" ~/ typeRef).? ~ "=" ~/ expr ~ ";").map {
+      case (name, tpe, e) => BodyStmt.Let(name, tpe, e)
+    }
+  }
+
+  private def assignStmt[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    // Lookahead-first: a bare `expr` here would fire inner cuts (callSuffix,
+    // `[...]`, `(...)`, string literals, `if`) and then die on a missing `=`,
+    // poisoning the enclosing `stmt.rep` fallback to the trailing expression.
+    // The cut-free probe only commits when a depth-0 `=` (not `==`) follows.
+    P(assignAhead ~ expr ~ "=" ~/ expr ~ ";").map { case (target, value) =>
+      BodyStmt.Effect(BodyExpr.Assign(target, value))
+    }
+  }
+
+  /** Cut-free probe for `symbol (.field | [...] | (...) | "...")* =` with a
+    * single `=` (not `==`) next. Skips bracketed/paren regions and
+    * double-quoted strings; `\"` escapes inside a probe abort it, which only
+    * rejects exotic assigns, never valid trailing expressions.
+    */
+  private def assignAhead[$: P]: P[Unit] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(&(idt.symbol ~ assignAheadFrag.rep ~ "=" ~ !"="))
+  }
+
+  private def assignAheadFrag[$: P]: P[Unit] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(
+      CharsWhile(c => c != '=' && c != ';' && c != '{' && c != '}' && c != '[' && c != ']' && c != '(' && c != ')' && c != '"', 1) |
+        ("[" ~ assignAheadFrag.rep ~ "]") |
+        ("(" ~ assignAheadFrag.rep ~ ")") |
+        ("\"" ~ CharsWhile(_ != '"', 0) ~ "\"")
+    )
+  }
+
+  private def forStmt[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    // Shared `for (` prefix with the cut before the branch: forC/forIn
+    // alternatives below it backtrack cleanly (no cuts fire before `=`/`in`).
+    P(kw.kw("for") ~/ "(" ~/ (forCRest | forInRest))
+  }
+
+  private def forInRest[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(idt.symbol ~ kw.kw("in") ~/ expr ~ ")" ~ block).map {
+      case (varName, iterable, body) => BodyStmt.Effect(BodyExpr.ForIn(varName, iterable, body))
+    }
+  }
+
+  private def forCRest[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(forInit ~ ";" ~/ expr ~ ";" ~/ forStep ~ ")" ~ block).map {
+      case (init, cond, step, body) => BodyStmt.Effect(BodyExpr.ForC(init, cond, step, body))
+    }
+  }
+
+  private def forInit[$: P]: P[ForInit] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(idt.symbol ~ (":" ~/ typeRef).? ~ "=" ~/ expr).map {
+      case (name, tpe, value) => ForInit(name, tpe, value)
+    }
+  }
+
+  private def forStep[$: P]: P[BodyExpr] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P((expr ~ "+=" ~/ expr).map { case (target, e) =>
+      // `i += e` desugars to `i = i + e`; no dedicated AST node.
+      BodyExpr.Assign(target, BodyExpr.BinOp("+", target, e))
+    } | (expr ~ "=" ~/ expr).map { case (target, value) =>
+      BodyExpr.Assign(target, value)
+    })
+  }
+
+  private def matchStmt[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(kw.kw("match") ~/ "(" ~/ expr ~ ")" ~ "{" ~/ matchArm.rep(1) ~ "}").map {
+      case (scrutinee, arms) => BodyStmt.Effect(BodyExpr.Match(scrutinee, arms.toList))
+    }
+  }
+
+  private def matchArm[$: P]: P[MatchArm] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(matchPattern ~ "=>" ~/ block).map { case (pattern, body) => MatchArm(pattern, body) }
+  }
+
+  private def matchPattern[$: P]: P[MatchPattern] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("_".!.map(_ => MatchPattern.Wildcard: MatchPattern) |
+      P(idt.symbol ~ ("(" ~/ idt.symbol ~ ")").?).map { case (name, binding) =>
+        MatchPattern.Variant(name, binding): MatchPattern
+      })
+  }
+
+  private def block[$: P]: P[BodyExpr.Block] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("{" ~/ stmt.rep ~ expr.? ~ "}").map { case (stmts, value) =>
+      BodyExpr.Block(stmts.toList, value)
+    }
   }
 
   private def expr[$: P]: P[BodyExpr]        = P(ifExpr | orExpr)

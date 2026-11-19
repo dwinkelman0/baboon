@@ -52,7 +52,17 @@ final case class RawCapture(
 
 final case class RawFnParam(name: String, tpe: RawTypeRef)
 
-final case class RawBody(letBindings: List[(String, BodyExpr)], result: BodyExpr)
+/** Fn body: the full statement list plus the trailing result expression.
+  *
+  * `stmts` is the canonical statement list (lets, assigns, for-loops, matches).
+  * `letBindings` is the legacy type-erased view of all top-level `let`s
+  * (including type-annotated ones) and is kept so existing readers keep working.
+  */
+final case class RawBody(
+  letBindings: List[(String, BodyExpr)],
+  result: BodyExpr,
+  stmts: List[BodyStmt] = Nil,
+)
 
 /** Context-function AST node: at most ONE capture (highest scope needed).
   * Zero captures (`fn(...){...}`) is valid; two captures fail at parse time.

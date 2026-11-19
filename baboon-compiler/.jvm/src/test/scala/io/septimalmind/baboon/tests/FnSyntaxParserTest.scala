@@ -2,7 +2,7 @@ package io.septimalmind.baboon.tests
 
 import fastparse.*
 import io.septimalmind.baboon.parser.ParserContext
-import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, FSPath, RawCaptureStep, RawDefaultValue, RawDto, RawDtoMember, RawFieldName, RawFn, RawLocatorSeg, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef}
+import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, BodyStmt, FSPath, MatchPattern, RawCaptureStep, RawDefaultValue, RawDto, RawDtoMember, RawFieldName, RawFn, RawLocatorSeg, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef}
 import izumi.fundamentals.collections.nonempty.NEString
 import org.scalatest.wordspec.AnyWordSpec
 
@@ -752,6 +752,189 @@ final class FnSyntaxParserTest extends AnyWordSpec {
         RawCaptureStep.Single(RawLocatorSeg.Field("members")),
         RawCaptureStep.Star(RawStarCapture("c", List(RawLocatorSeg.Field("data")))),
       ))
+    }
+
+    "parse assignment to an indexed map target" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { self.map[key] = value; value }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts.size == 1)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.Assign(target, value)) =>
+          assert(target == BodyExpr.Path("self", List(
+            BodyExpr.Segment.Field("map"),
+            BodyExpr.Segment.Index(BodyExpr.Path("key", Nil)),
+          )))
+          assert(value == BodyExpr.Path("value", Nil))
+        case other => fail(s"expected assign effect, got $other")
+      }
+      assert(fn.body.result == BodyExpr.Path("value", Nil))
+    }
+
+    "parse assignment to a plain variable" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { let x = 1; x = 2; x }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts.size == 2)
+      fn.body.stmts.tail.head match {
+        case BodyStmt.Effect(BodyExpr.Assign(target, value)) =>
+          assert(target == BodyExpr.Path("x", Nil))
+          assert(value == BodyExpr.Lit(BodyLiteral.IntLit(2)))
+        case other => fail(s"expected assign effect, got $other")
+      }
+      assert(fn.body.result == BodyExpr.Path("x", Nil))
+    }
+
+    "parse let with a type annotation" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { let x: u32 = 42; x }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts == List(BodyStmt.Let(
+        "x",
+        Some(RawTypeRef.Simple(RawTypeName("u32"), Nil)),
+        BodyExpr.Lit(BodyLiteral.IntLit(42)),
+      )))
+      // legacy type-erased view still exposes the binding
+      assert(fn.body.letBindings == List(("x", BodyExpr.Lit(BodyLiteral.IntLit(42)))))
+      assert(fn.body.result == BodyExpr.Path("x", Nil))
+    }
+
+    "parse for-in loop over a map" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { for (key in self.map) { key } key }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts.size == 1)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.ForIn(varName, iterable, body)) =>
+          assert(varName == "key")
+          assert(iterable == BodyExpr.Path("self", List(BodyExpr.Segment.Field("map"))))
+          assert(body == BodyExpr.Block(Nil, Some(BodyExpr.Path("key", Nil))))
+        case other => fail(s"expected for-in, got $other")
+      }
+      assert(fn.body.result == BodyExpr.Path("key", Nil))
+    }
+
+    "parse C-style for loop with += step" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { for (i: u32 = 0; i < 10; i += 1) { i } i }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts.size == 1)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.ForC(init, cond, step, body)) =>
+          assert(init.name == "i")
+          assert(init.tpe == Some(RawTypeRef.Simple(RawTypeName("u32"), Nil)))
+          assert(init.value == BodyExpr.Lit(BodyLiteral.IntLit(0)))
+          assert(cond == BodyExpr.BinOp("<", BodyExpr.Path("i", Nil), BodyExpr.Lit(BodyLiteral.IntLit(10))))
+          assert(step == BodyExpr.Assign(
+            BodyExpr.Path("i", Nil),
+            BodyExpr.BinOp("+", BodyExpr.Path("i", Nil), BodyExpr.Lit(BodyLiteral.IntLit(1))),
+          ))
+          assert(body == BodyExpr.Block(Nil, Some(BodyExpr.Path("i", Nil))))
+        case other => fail(s"expected C-style for, got $other")
+      }
+    }
+
+    "parse C-style for loop with assign step and untyped init" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { for (i = 0; i < 10; i = i + 1) { i } i }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.ForC(init, cond, step, _)) =>
+          assert(init.name == "i")
+          assert(init.tpe.isEmpty)
+          assert(init.value == BodyExpr.Lit(BodyLiteral.IntLit(0)))
+          assert(cond == BodyExpr.BinOp("<", BodyExpr.Path("i", Nil), BodyExpr.Lit(BodyLiteral.IntLit(10))))
+          assert(step == BodyExpr.Assign(
+            BodyExpr.Path("i", Nil),
+            BodyExpr.BinOp("+", BodyExpr.Path("i", Nil), BodyExpr.Lit(BodyLiteral.IntLit(1))),
+          ))
+        case other => fail(s"expected C-style for, got $other")
+      }
+    }
+
+    "parse Rust-style match with variant and wildcard arms" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { match (v) { Some(x) => { x } _ => { 0 } } v }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts.size == 1)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.Match(scrutinee, arms)) =>
+          assert(scrutinee == BodyExpr.Path("v", Nil))
+          assert(arms.size == 2)
+          assert(arms.head.pattern == MatchPattern.Variant("Some", Some("x")))
+          assert(arms.head.body == BodyExpr.Block(Nil, Some(BodyExpr.Path("x", Nil))))
+          assert(arms.tail.head.pattern == MatchPattern.Wildcard)
+          assert(arms.tail.head.body == BodyExpr.Block(Nil, Some(BodyExpr.Lit(BodyLiteral.IntLit(0)))))
+        case other => fail(s"expected match, got $other")
+      }
+      assert(fn.body.result == BodyExpr.Path("v", Nil))
+    }
+
+    "parse match with a bare variant pattern" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { match (self.opt) { None => { 0 } _ => { 1 } } self }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.Match(scrutinee, arms)) =>
+          assert(scrutinee == BodyExpr.Path("self", List(BodyExpr.Segment.Field("opt"))))
+          assert(arms.head.pattern == MatchPattern.Variant("None", None))
+          assert(arms.tail.head.pattern == MatchPattern.Wildcard)
+        case other => fail(s"expected match, got $other")
+      }
+    }
+
+    "parse loop body with statements and no trailing value" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { for (k in self.map) { self.map[k] = k; } self }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.ForIn(varName, _, body)) =>
+          assert(varName == "k")
+          assert(body.value.isEmpty)
+          assert(body.stmts.size == 1)
+          body.stmts.head match {
+            case BodyStmt.Effect(BodyExpr.Assign(target, value)) =>
+              assert(target == BodyExpr.Path("self", List(
+                BodyExpr.Segment.Field("map"),
+                BodyExpr.Segment.Index(BodyExpr.Path("k", Nil)),
+              )))
+              assert(value == BodyExpr.Path("k", Nil))
+            case other => fail(s"expected assign in loop body, got $other")
+          }
+        case other => fail(s"expected for-in, got $other")
+      }
+    }
+
+    "parse match arm bodies with statements before the value" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { match (v) { Some(x) => { let y = x; y } _ => { 0 } } v }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.Match(_, arms)) =>
+          assert(arms.head.body == BodyExpr.Block(
+            List(BodyStmt.Let("y", None, BodyExpr.Path("x", Nil))),
+            Some(BodyExpr.Path("y", Nil)),
+          ))
+        case other => fail(s"expected match, got $other")
+      }
+    }
+
+    "parse mixed lets, assigns, loops and match in one body" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { let n: u32 = 0; n = 1; for (k in self.map) { k } match (n) { _ => { n } } n }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts.size == 4)
+      assert(fn.body.letBindings == List(("n", BodyExpr.Lit(BodyLiteral.IntLit(0)))))
+      assert(fn.body.stmts.head.isInstanceOf[BodyStmt.Let])
+      assert(fn.body.stmts(1).isInstanceOf[BodyStmt.Effect])
+      assert(fn.body.result == BodyExpr.Path("n", Nil))
+    }
+
+    "reject missing semicolon on assign and typed let" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { self.map[key] = value value }) x: str }")
+      expectParseFailure("data D { @default(fn[self: Self]() { let x: u32 = 1 x }) x: str }")
+    }
+
+    "reject bad for headers" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { for (key self.map) { key } key }) x: str }")
+      expectParseFailure("data D { @default(fn[self: Self]() { for key in self.map { key } key }) x: str }")
+    }
+
+    "reject match without arms" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { match (v) { } v }) x: str }")
+    }
+
+    "reject single = in for condition" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { for (i: u32 = 0; i = 10; i += 1) { i } i }) x: str }")
     }
 
   }
