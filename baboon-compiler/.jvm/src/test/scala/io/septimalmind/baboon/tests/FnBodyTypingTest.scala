@@ -459,5 +459,135 @@ final class FnBodyTypingTest extends AnyWordSpec {
       val errs = mustFail(Nil, strLit("x"), childScope(), i32)
       assert(errs.mkString.contains("does not conform"))
     }
+
+    "type assert without message and collect vars" in {
+      val cond = BodyExpr.BinOp(">", path("self", fld("count")), intLit(0))
+      val b = mustType(List(BodyStmt.Assert(cond, None)), path("self", fld("count")), childScope(), i32)
+      assert(b.assertions.size == 1)
+      assert(b.assertions.head.capturedVars == List("self"))
+      assert(b.assertions.head.msg.isEmpty)
+      assert(b.assertions.head.trace.isEmpty)
+      b.stmts.head match {
+        case TypedStmt.Assert(a) =>
+          assert(a.cond.tpe == bit)
+          assert(FnTypes.isVoid(a.cond.tpe) == false)
+        case other => fail(s"expected typed assert, got $other")
+      }
+    }
+
+    "type assert with message and operator-result == as bool" in {
+      val cond = BodyExpr.BinOp("==", path("self", fld("data")), strLit("x"))
+      val b = mustType(
+        List(BodyStmt.Assert(cond, Some(strLit("bad")))),
+        path("self", fld("data")),
+        childScope(),
+        str,
+      )
+      assert(b.assertions.size == 1)
+      assert(b.assertions.head.capturedVars == List("self"))
+      assert(b.assertions.head.msg.map(_.tpe) == Some(str))
+    }
+
+    "type assert collecting multiple vars in order" in {
+      val sc = childScope("a" -> ScopeEntry.Param(bit), "b" -> ScopeEntry.Param(bit))
+      val cond = BodyExpr.BinOp("&&", path("a"), BodyExpr.BinOp("&&", path("b"), path("a")))
+      val b = mustType(List(BodyStmt.Assert(cond, None)), intLit(1), sc, i32)
+      assert(b.assertions.head.capturedVars == List("a", "b"))
+    }
+
+    "type assert inside a for body and surface it in TypedBody.assertions" in {
+      val loop = BodyExpr.ForIn(
+        "k",
+        path("self", fld("scores")),
+        BodyExpr.Block(List(BodyStmt.Assert(BodyExpr.BinOp("!=", path("k"), strLit("")), None)), None),
+      )
+      val b = mustType(List(eff(loop)), path("self", fld("count")), childScope(), i32)
+      assert(b.assertions.size == 1)
+      assert(b.assertions.head.capturedVars == List("k"))
+    }
+
+    "type assert inside match arm blocks" in {
+      val sc = childScope("o" -> ScopeEntry.Param(ctor(opt, List(str))))
+      val m = BodyExpr.Match(
+        path("o"),
+        List(
+          MatchArm(
+            MatchPattern.Variant("Some", Some("x")),
+            BodyExpr.Block(
+              List(BodyStmt.Assert(BodyExpr.BinOp("!=", path("x"), strLit("")), Some(strLit("empty")))),
+              Some(path("x")),
+            ),
+          ),
+          MatchArm(MatchPattern.Variant("None", None), BodyExpr.Block(Nil, Some(strLit("")))),
+        ),
+      )
+      val b = mustType(Nil, m, sc, str)
+      assert(b.tpe == str)
+      // nested asserts are reachable via the typed match arm blocks
+      val nested = b.result match {
+        case TypedExpr.Match(_, arms, _) =>
+          arms.flatMap(a => FnBodyTyper.collectAsserts(a.body.stmts))
+        case other => fail(s"expected typed match, got $other")
+      }
+      assert(nested.size == 1)
+      assert(nested.head.capturedVars == List("x"))
+    }
+
+    "loops and valueless blocks carry void" in {
+      val loop = BodyExpr.ForIn("k", path("self", fld("tags")), BodyExpr.Block(Nil, Some(path("k"))))
+      val sc = childScope()
+      FnBodyTyper.typeExpr(loop, sc, schema) match {
+        case Right(t: TypedExpr.ForIn) => assert(FnTypes.isVoid(t.tpe))
+        case Right(other)               => fail(s"expected ForIn, got $other")
+        case Left(err)                  => fail(s"expected success: ${err.mkString("; ")}")
+      }
+      FnBodyTyper.typeExpr(BodyExpr.Block(Nil, None), sc, schema) match {
+        case Right(t: TypedExpr.Block) => assert(FnTypes.isVoid(t.tpe))
+        case Right(other)              => fail(s"expected Block, got $other")
+        case Left(err)                 => fail(s"expected success: ${err.mkString("; ")}")
+      }
+    }
+  }
+
+  "P3 body typing (assert negatives)" should {
+    "reject a non-bool assert condition" in {
+      val errs = mustFail(
+        List(BodyStmt.Assert(intLit(1), None)),
+        intLit(0),
+        childScope(),
+        i32,
+      )
+      assert(errs.mkString.contains("assert condition must be bit"))
+    }
+
+    "reject a non-str assert message" in {
+      val errs = mustFail(
+        List(BodyStmt.Assert(BodyExpr.Lit(BodyLiteral.BoolLit(true)), Some(intLit(1)))),
+        intLit(0),
+        childScope(),
+        i32,
+      )
+      assert(errs.mkString.contains("assert message must be str"))
+    }
+
+    "reject an unknown var in assert condition" in {
+      val errs = mustFail(
+        List(BodyStmt.Assert(path("nope"), None)),
+        intLit(0),
+        childScope(),
+        i32,
+      )
+      assert(errs.mkString.contains("unknown path root"))
+    }
+
+    "reject assert used as trailing value is a parse-level absence (modelled as no Assert expr)" in {
+      // `BodyStmt.Assert` is statement-only: there is no `BodyExpr.Assert`, so
+      // a trailing `assert(...)` cannot be constructed as a value. Typing the
+      // equivalent bool expression as the result must still succeed, proving
+      // asserts do not masquerade as values.
+      val b = mustType(Nil, BodyExpr.Lit(BodyLiteral.BoolLit(true)), childScope(), bit)
+      assert(b.assertions.isEmpty)
+      assert(b.tpe == bit)
+    }
   }
 }

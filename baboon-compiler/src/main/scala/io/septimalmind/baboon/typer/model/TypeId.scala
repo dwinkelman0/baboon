@@ -60,6 +60,12 @@ object TypeId {
     final val tso   = BuiltinScalar(TypeName("tso"))
     final val bytes = BuiltinScalar(TypeName("bytes"))
 
+    /** Valueless-statement result: loops, valueless blocks and `assert`.
+      * Previously `bit` was reused as a unit placeholder; `void` is now
+      * explicit so backends can distinguish "no value" from a real boolean.
+      */
+    final val void = BuiltinScalar(TypeName("void"))
+
     final val map = BuiltinCollection(TypeName("map"))
     final val opt = BuiltinCollection(TypeName("opt"))
     final val lst = BuiltinCollection(TypeName("lst"))

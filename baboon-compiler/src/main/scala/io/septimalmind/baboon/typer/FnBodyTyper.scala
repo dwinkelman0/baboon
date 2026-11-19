@@ -18,12 +18,16 @@ import FnTypes._
   *   - `match` scrutinees must be an ADT (or `opt[T]` for `Some`/`None`);
   *     unknown variants are errors; all arms must agree on the result type;
   *   - `if` conds must be `bit`; branches join;
+  *   - `assert(cond[, msg])` conds must be `bit`, `msg` must be `str`;
+  *     asserts are `void` side-conditions and never affect the result type;
   *   - the final result must conform to the expected (field) type.
   */
 object FnBodyTyper {
 
-  /** Unit placeholder for statement-position nodes without a value. */
-  val unitTpe: TypeRef = TypeRef.Scalar(TypeId.Builtins.bit)
+  /** Unit type for statement-position nodes without a value (`void`).
+    * Previously `bit` was reused as a placeholder; `void` is now explicit.
+    */
+  val unitTpe: TypeRef = TypeRef.Scalar(TypeId.Builtins.void)
 
   /** Seed a fn scope from params plus P2 capture bindings. */
   def seedScope(
@@ -48,7 +52,7 @@ object FnBodyTyper {
       _ <-
         if (conformsLit(result, expected)) ok(())
         else fail[Unit](s"body result type ${result.tpe} does not conform to expected $expected")
-    } yield TypedBody(stmts, result, result.tpe)
+    } yield TypedBody(stmts, result, result.tpe, collectAsserts(stmts))
 
   // -- statements -----------------------------------------------------------
 
@@ -88,6 +92,83 @@ object FnBodyTyper {
       // `for` binders never escape into the enclosing scope: they only live
       // inside their bodies (handled in `typeExpr`).
       typeExpr(expr, scope, schema).map(t => (TypedStmt.Effect(t), scope))
+    case BodyStmt.Assert(cond, msg) =>
+      for {
+        c <- typeExpr(cond, scope, schema)
+        _ <-
+          if (conformsLit(c, scalar("bit"))) ok(())
+          else fail[Unit](s"assert condition must be bit, got ${c.tpe}")
+        m <- traverse(msg.toList.map(typeExpr(_, scope, schema)))
+        _ <- m.headOption match {
+          case None => ok(())
+          case Some(mm) =>
+            if (conformsLit(mm, scalar("str"))) ok(())
+            else fail[Unit](s"assert message must be str, got ${mm.tpe}")
+        }
+      } yield {
+        val typed = TypedAssert(c, m.headOption, collectAssertVars(c), None)
+        (TypedStmt.Assert(typed), scope)
+      }
+  }
+
+  /** Distinct `Path` roots involved in an assert condition, in
+    * first-occurrence order, for backend trace metadata. Walks the *typed*
+    * condition so only successfully-resolved roots are recorded.
+    */
+  def collectAssertVars(cond: TypedExpr): List[String] = {
+    def go(e: TypedExpr, acc: List[String]): List[String] = e match {
+      case TypedExpr.Path(root, segs, _) =>
+        val fromSegs = segs.collect { case TypedPathSeg.Index(idx, _) => idx }.foldLeft(acc)((a, idx) => go(idx, a))
+        if (fromSegs.contains(root)) fromSegs else fromSegs :+ root
+      case TypedExpr.Call(t, _, args, _)  => args.foldLeft(go(t, acc))((a, x) => go(x, a))
+      case TypedExpr.BinOp(_, l, r, _)    => go(r, go(l, acc))
+      case TypedExpr.UnaryOp(_, x, _)     => go(x, acc)
+      case TypedExpr.If(c, t, e, _)       => go(e, go(t, go(c, acc)))
+      case TypedExpr.Assign(t, v, _)      => go(v, go(t, acc))
+      case TypedExpr.ForIn(_, it, b, _)   => goBlock(b, go(it, acc))
+      case TypedExpr.ForC(init, c, s, b, _) =>
+        goBlock(b, go(s, go(c, go(init.value, acc))))
+      case TypedExpr.Match(s, arms, _) =>
+        arms.foldLeft(go(s, acc))((a, arm) => goBlock(arm.body, a))
+      case TypedExpr.Block(stmts, v, _) =>
+        val a2 = stmts.foldLeft(acc) {
+          case (a, TypedStmt.Let(_, _, x))  => go(x, a)
+          case (a, TypedStmt.Effect(x))    => go(x, a)
+          case (a, TypedStmt.Assert(asrt)) =>
+            val aCond = go(asrt.cond, a)
+            asrt.msg.foldLeft(aCond)((x, mm) => go(mm, x))
+        }
+        v.foldLeft(a2)((a, x) => go(x, a))
+      case TypedExpr.Lit(_, _) => acc
+    }
+    def goBlock(b: TypedExpr.Block, acc: List[String]): List[String] = go(b, acc)
+    go(cond, Nil)
+  }
+
+  /** Every assertion in a typed statement list, including ones nested in
+    * blocks, loops and match arms, in source order.
+    */
+  def collectAsserts(stmts: List[TypedStmt]): List[TypedAssert] = {
+    def fromExpr(e: TypedExpr): List[TypedAssert] = e match {
+      case TypedExpr.ForIn(_, _, b, _)    => fromBlock(b)
+      case TypedExpr.ForC(_, _, _, b, _)  => fromBlock(b)
+      case TypedExpr.Match(_, arms, _)    => arms.flatMap(a => fromBlock(a.body))
+      case TypedExpr.Block(ss, _, _)      => fromStmts(ss)
+      case TypedExpr.If(_, t, e, _)       => fromExpr(t) ++ fromExpr(e)
+      case TypedExpr.BinOp(_, l, r, _)    => fromExpr(l) ++ fromExpr(r)
+      case TypedExpr.UnaryOp(_, x, _)     => fromExpr(x)
+      case TypedExpr.Call(t, _, args, _)  => fromExpr(t) ++ args.flatMap(fromExpr)
+      case TypedExpr.Assign(t, v, _)      => fromExpr(t) ++ fromExpr(v)
+      case _                              => Nil
+    }
+    def fromBlock(b: TypedExpr.Block): List[TypedAssert] =
+      fromStmts(b.stmts) ++ b.value.toList.flatMap(fromExpr)
+    def fromStmts(ss: List[TypedStmt]): List[TypedAssert] = ss.flatMap {
+      case TypedStmt.Assert(a)  => List(a) ++ fromExpr(a.cond) ++ a.msg.toList.flatMap(fromExpr)
+      case TypedStmt.Let(_, _, v) => fromExpr(v)
+      case TypedStmt.Effect(e)  => fromExpr(e)
+    }
+    fromStmts(stmts)
   }
 
   // -- expressions ----------------------------------------------------------

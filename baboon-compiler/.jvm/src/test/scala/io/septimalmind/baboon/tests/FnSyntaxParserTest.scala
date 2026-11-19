@@ -937,5 +937,53 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       expectParseFailure("data D { @default(fn[self: Self]() { for (i: u32 = 0; i = 10; i += 1) { i } i }) x: str }")
     }
 
+    "parse assert without message" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { assert(self.flag); self }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts == List(BodyStmt.Assert(
+        BodyExpr.Path("self", List(BodyExpr.Segment.Field("flag"))),
+        None,
+      )))
+    }
+
+    "parse assert with message" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { assert(self.count > 0, \"must be positive\"); self }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.stmts == List(BodyStmt.Assert(
+        BodyExpr.BinOp(">", BodyExpr.Path("self", List(BodyExpr.Segment.Field("count"))), BodyExpr.Lit(BodyLiteral.IntLit(0))),
+        Some(BodyExpr.Lit(BodyLiteral.StrLit("must be positive"))),
+      )))
+    }
+
+    "parse assert inside for body" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { for (k in self.map) { assert(k != \"\"); } self }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.ForIn(_, _, body)) =>
+          assert(body.stmts == List(BodyStmt.Assert(
+            BodyExpr.BinOp("!=", BodyExpr.Path("k", Nil), BodyExpr.Lit(BodyLiteral.StrLit(""))),
+            None,
+          )))
+        case other => fail(s"expected for-in, got $other")
+      }
+    }
+
+    "parse assert inside match arm block" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { match (v) { Some(x) => { assert(x != \"\"); x } _ => { \"\" } } v }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      fn.body.stmts.head match {
+        case BodyStmt.Effect(BodyExpr.Match(_, arms)) =>
+          assert(arms.head.body.stmts == List(BodyStmt.Assert(
+            BodyExpr.BinOp("!=", BodyExpr.Path("x", Nil), BodyExpr.Lit(BodyLiteral.StrLit(""))),
+            None,
+          )))
+        case other => fail(s"expected match, got $other")
+      }
+    }
+
+    "reject assert without semicolon" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { assert(self.flag) self }) x: str }")
+    }
+
   }
 }
