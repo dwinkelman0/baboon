@@ -44,6 +44,16 @@ sealed trait BodyStmt
 object BodyStmt {
   final case class Let(name: String, tpe: Option[RawTypeRef], value: BodyExpr) extends BodyStmt
   final case class Effect(expr: BodyExpr) extends BodyStmt
+
+  /** Validation assertion: `assert(cond);` or `assert(cond, msg);`.
+    *
+    * Statement position only (never a trailing value expression): `cond`
+    * must be a `bit` expression, `msg` (when present) must be a `str`
+    * expression. Parsed with a `;` terminator like the other statements, so
+    * it is allowed anywhere statements occur — fn bodies, blocks, for
+    * bodies and match arms.
+    */
+  final case class Assert(cond: BodyExpr, msg: Option[BodyExpr]) extends BodyStmt
 }
 
 sealed trait BodyLiteral

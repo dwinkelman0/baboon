@@ -85,8 +85,8 @@ object TypedLit {
 
 /** P3 output: every node carries its `tpe`. Statement-position nodes
   * (`Assign`, `ForIn`, `ForC`, value-less `Block`) carry `tpe` of their
-  * natural result (`Assign` => value type; loops / valueless blocks => `bit`
-  * as a unit placeholder, never inspected for conformance).
+  * natural result (`Assign` => value type; loops / valueless blocks / asserts
+  * => `void`, never inspected for conformance).
   */
 sealed trait TypedExpr {
   def tpe: TypeRef
@@ -123,10 +123,27 @@ sealed trait TypedStmt
 object TypedStmt {
   final case class Let(name: String, tpe: TypeRef, value: TypedExpr) extends TypedStmt
   final case class Effect(expr: TypedExpr) extends TypedStmt
+  final case class Assert(assert: TypedAssert) extends TypedStmt
 }
 
-/** P3 output for one fn body: typed statements plus the typed result. */
-final case class TypedBody(stmts: List[TypedStmt], result: TypedExpr, tpe: TypeRef)
+/** P3 output for one assertion: `cond` must be `bit`, `msg` (when present)
+  * must be `str`. `capturedVars` records the distinct `Path` roots involved
+  * in `cond`, in first-occurrence order, for backend trace metadata.
+  * `trace` is a backend slot (e.g. rendered message template); P3 leaves it
+  * empty (`None`).
+  */
+final case class TypedAssert(
+  cond: TypedExpr,
+  msg: Option[TypedExpr],
+  capturedVars: List[String],
+  trace: Option[String] = None,
+)
+
+/** P3 output for one fn body: typed statements plus the typed result.
+  * `assertions` is the flattened list of every `TypedAssert` in the body
+  * (including ones nested in blocks, loops and match arms), in source order.
+  */
+final case class TypedBody(stmts: List[TypedStmt], result: TypedExpr, tpe: TypeRef, assertions: List[TypedAssert] = Nil)
 
 /** One ADT variant for match checking: `payload=None` means the variant
   * carries no data (e.g. `None`); `Some(t)` is the binding type.
@@ -159,6 +176,14 @@ object FnTypes {
 
   def scalar(name: String): TypeRef =
     TypeRef.Scalar(TypeId.BuiltinScalar(TypeName(name)))
+
+  /** Explicit unit type for valueless positions (`void`). */
+  def voidTpe: TypeRef = TypeRef.Scalar(TypeId.Builtins.void)
+
+  def isVoid(t: TypeRef): Boolean = t match {
+    case TypeRef.Scalar(id: TypeId.BuiltinScalar) => id == TypeId.Builtins.void
+    case _                                        => false
+  }
 
   def ctor(name: TypeId.BuiltinCollection, args: List[TypeRef]): TypeRef =
     TypeRef.Constructor(name, NEList.unsafeFrom(args))

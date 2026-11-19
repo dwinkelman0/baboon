@@ -242,7 +242,14 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def stmt[$: P]: P[BodyStmt] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(forStmt | matchStmt | letStmt | assignStmt)
+    P(assertStmt | forStmt | matchStmt | letStmt | assignStmt)
+  }
+
+  private def assertStmt[$: P]: P[BodyStmt] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P(kw.kw("assert") ~/ "(" ~/ expr ~ ("," ~/ expr).? ~ ")" ~ ";").map {
+      case (cond, msg) => BodyStmt.Assert(cond, msg)
+    }
   }
 
   private def letStmt[$: P]: P[BodyStmt] = {
