@@ -1,0 +1,199 @@
+// SoC power/performance study schema (studies/power_arch1).
+//
+// One study-agnostic model: hot (per-point) + cold (per-study config) +
+// scalar (quasi-static tuning) inputs are plain required fields on a single
+// root DTO; versioned tables are embedded as lst[Point] instances in-schema
+// (gaps-and-principles.md: tables in-schema, schemas study-agnostic).
+// All derived quantities are computed fn-properties (no wire); all domain
+// violations are assert-only (never propagated).
+//
+// Conventions: every `let` carries an explicit `: f64`/`: bit` annotation
+// (operator-result-only inference); all numerics are f64 so every BinOp is
+// homogeneous; interpolation is an explicit for-in lerp (no builtins).
+
+model power.arch1
+
+version "1.0.0"
+
+// Operating point: hot inputs (per sweep point).
+data OpPoint {
+  voltage: f64
+  freq: f64
+  temp: f64
+}
+
+// Architecture config: cold inputs (per study).
+data Arch {
+  cores: f64
+  cacheMB: f64
+  memCfg: str
+}
+
+// Workload: hot inputs (per sweep point).
+data Workload {
+  activity: f64
+  memIntensity: f64
+}
+
+// Quasi-static tuning scalars. Neutral-singleton defaults (x1 identity)
+// are the only defaults in this schema; everything else is required.
+data Scalars {
+  @default(1.0) ceffMult: f64
+  @default(1.0) leakMult: f64
+  @default(1.0) perfAdj: f64
+}
+
+// Leakage table row: static power at a table voltage (nominal corner).
+data LeakPoint {
+  voltage: f64
+  pleak: f64
+}
+
+// Memory-efficiency table row: efficiency vs memory intensity.
+data MemPoint {
+  intensity: f64
+  meff: f64
+}
+
+// V-f table row: max stable frequency at a table voltage.
+data VfPoint {
+  voltage: f64
+  fmax: f64
+}
+
+root data SoC {
+  op: OpPoint
+  arch: Arch
+  workload: Workload
+  scalars: Scalars
+  leakTable: lst[LeakPoint]
+  memTable: lst[MemPoint]
+  vfTable: lst[VfPoint]
+  opsPerTask: f64
+  bytesPerTask: f64
+  bwPeak: f64
+  ipc: f64
+  baseCeff: f64
+  pcap: f64
+  tmax: f64
+
+  // 1. Effective switched capacitance.
+  ceff: f64 = fn(self: Self) {
+    let perCore: f64 = self.baseCeff * self.scalars.ceffMult;
+    perCore * self.arch.cores
+  }
+
+  // 2. Dynamic power: Ceff * V^2 * f * activity.
+  pdyn: f64 = fn(self: Self) {
+    assert(0.0 < self.workload.activity, "activity must be positive");
+    assert(self.workload.activity <= 1.0, "activity must be within (0, 1]");
+    assert(0.0 < self.scalars.ceffMult, "ceffMult must be positive");
+    assert(self.scalars.ceffMult <= 1.0, "ceffMult derate must be within (0, 1]");
+    let v2: f64 = self.op.voltage * self.op.voltage;
+    let vf: f64 = v2 * self.op.freq;
+    self.ceff * vf * self.workload.activity
+  }
+
+  // 3. Leakage power: leak_table(V) lerped over voltage, scaled by leakMult.
+  // Explicit for-in lerp: bracket x between the last row with
+  // voltage <= x (px,py) and the first row with voltage >= x (qx,qy).
+  pleak: f64 = fn(self: Self) {
+    assert(0.0 < self.scalars.leakMult, "leakMult must be positive");
+    assert(self.scalars.leakMult <= 1.0, "leakMult derate must be within (0, 1]");
+    let x: f64 = self.op.voltage;
+    let px: f64 = self.leakTable[0].voltage;
+    let py: f64 = self.leakTable[0].pleak;
+    let qx: f64 = self.leakTable[0].voltage;
+    let qy: f64 = self.leakTable[0].pleak;
+    let hit: bit = false;
+    for (p in self.leakTable) {
+      px = if (p.voltage <= x) { p.voltage } else { px };
+      py = if (p.voltage <= x) { p.pleak } else { py };
+      qx = if (hit == false) { if (p.voltage >= x) { p.voltage } else { qx } } else { qx };
+      qy = if (hit == false) { if (p.voltage >= x) { p.pleak } else { qy } } else { qy };
+      hit = if (hit == false) { p.voltage >= x } else { hit };
+    }
+    let span: f64 = qx - px;
+    let t: f64 = if (span <= 0.0) { 0.0 } else { (x - px) / span };
+    let base: f64 = py + t * (qy - py);
+    base * self.scalars.leakMult
+  }
+
+  // 4. Memory efficiency: mem_table(intensity) lerped. Same bracket idiom.
+  meff: f64 = fn(self: Self) {
+    assert(0.0 <= self.workload.memIntensity, "memIntensity must be non-negative");
+    assert(self.workload.memIntensity <= 1.0, "memIntensity must be within [0, 1]");
+    let x: f64 = self.workload.memIntensity;
+    let px: f64 = self.memTable[0].intensity;
+    let py: f64 = self.memTable[0].meff;
+    let qx: f64 = self.memTable[0].intensity;
+    let qy: f64 = self.memTable[0].meff;
+    let hit: bit = false;
+    for (p in self.memTable) {
+      px = if (p.intensity <= x) { p.intensity } else { px };
+      py = if (p.intensity <= x) { p.meff } else { py };
+      qx = if (hit == false) { if (p.intensity >= x) { p.intensity } else { qx } } else { qx };
+      qy = if (hit == false) { if (p.intensity >= x) { p.meff } else { qy } } else { qy };
+      hit = if (hit == false) { p.intensity >= x } else { hit };
+    }
+    let span: f64 = qx - px;
+    let t: f64 = if (span <= 0.0) { 0.0 } else { (x - px) / span };
+    py + t * (qy - py)
+  }
+
+  // 5. Compute time per task.
+  tcomp: f64 = fn(self: Self) {
+    assert(0.0 < self.op.freq, "freq must be positive");
+    assert(0.0 < self.arch.cores, "cores must be positive");
+    assert(0.0 < self.ipc, "ipc must be positive");
+    self.opsPerTask / (self.op.freq * self.arch.cores * self.ipc)
+  }
+
+  // 6. Memory time per task.
+  tmem: f64 = fn(self: Self) {
+    assert(0.0 < self.bwPeak, "bwPeak must be positive");
+    assert(0.0 < self.meff, "meff must be positive");
+    self.bytesPerTask / (self.bwPeak * self.meff)
+  }
+
+  // 7. Roofline effective time: min compute/memory bound.
+  teff: f64 = fn(self: Self) {
+    assert(0.0 < self.tcomp, "tcomp must be positive");
+    assert(0.0 < self.tmem, "tmem must be positive");
+    self.tcomp.min(self.tmem)
+  }
+
+  // 8. Total power + envelope asserts (V-f membership, caps).
+  ptotal: f64 = fn(self: Self) {
+    assert(self.op.temp <= self.tmax, "temp exceeds tmax");
+    let v: f64 = self.op.voltage;
+    let f: f64 = self.op.freq;
+    let fmax: f64 = self.vfTable[0].fmax;
+    let found: bit = false;
+    for (p in self.vfTable) {
+      found = if (p.voltage == v) { true } else { found };
+      fmax = if (p.voltage == v) { p.fmax } else { fmax };
+    }
+    assert(found, "voltage not in V-f table");
+    assert(f <= fmax, "freq exceeds fmax for voltage");
+    let tot: f64 = self.pdyn + self.pleak;
+    assert(0.0 <= tot, "ptotal must be non-negative");
+    assert(tot <= self.pcap, "ptotal exceeds pcap");
+    tot
+  }
+
+  // 9a. Energy per op.
+  eop: f64 = fn(self: Self) {
+    assert(0.0 < self.opsPerTask, "opsPerTask must be positive");
+    assert(0.0 < self.teff, "teff must be positive");
+    self.ptotal * self.teff / self.opsPerTask
+  }
+
+  // 9b. Performance per watt, with perf-adj tuning scalar.
+  perfW: f64 = fn(self: Self) {
+    assert(0.0 < self.ptotal, "ptotal must be positive");
+    assert(0.0 < self.teff, "teff must be positive");
+    let opsPerSec: f64 = self.opsPerTask / self.teff;
+    opsPerSec / self.ptotal * self.scalars.perfAdj
+  }
+}

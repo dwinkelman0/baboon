@@ -228,3 +228,13 @@ notes.local.md
 
 # local plans (untracked)
 plans/
+
+# Study codegen outputs (regenerable via baboon lowering) — do not check in
+studies/**/codegen/
+studies/**/generated/
+studies/power_arch1/**/generated*/
+studies/**/pygen/
+studies/**/__pycache__/
+**/__pycache__/
+*.pyc
+**/*.pyc

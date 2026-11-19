@@ -1,0 +1,31 @@
+{
+  "data_versions": {
+    "leak": "leak-nominal-v1",
+    "meff": "meff-v1",
+    "vf": "vf-v1"
+  },
+  "inputs": {
+    "derates": [
+      {
+        "ceffMult": 1.0,
+        "leakMult": 1.0
+      },
+      {
+        "ceffMult": 0.9,
+        "leakMult": 1.0
+      },
+      {
+        "ceffMult": 1.0,
+        "leakMult": 0.8
+      },
+      {
+        "ceffMult": 0.9,
+        "leakMult": 0.8
+      }
+    ],
+    "fixed": "golden point, scalars vary"
+  },
+  "model_version": "power.arch1@1.0.0",
+  "results_hash": "a42ac93ccae5f3aad34b85eab043f6fd2ac9353baf3120d3509348f020427c2b",
+  "study": "derate"
+}

@@ -1,0 +1,31 @@
+{
+  "data_versions": {
+    "leak": "leak-nominal-v1",
+    "meff": "meff-v1",
+    "vf": "vf-v1"
+  },
+  "inputs": {
+    "fixed": "cores=4, activity=0.5, memIntensity=0.5, bytesPerTask=2.4e9",
+    "sweep": [
+      {
+        "freq": 1600000000.0,
+        "voltage": 0.7
+      },
+      {
+        "freq": 2200000000.0,
+        "voltage": 0.8
+      },
+      {
+        "freq": 2800000000.0,
+        "voltage": 0.9
+      },
+      {
+        "freq": 3400000000.0,
+        "voltage": 1.0
+      }
+    ]
+  },
+  "model_version": "power.arch1@1.0.0",
+  "results_hash": "82f0aea36f87f124df755c4ef2aa7d82b7fb5f5b133fa2241ddd5aedb9b866f5",
+  "study": "freq_sweep"
+}
