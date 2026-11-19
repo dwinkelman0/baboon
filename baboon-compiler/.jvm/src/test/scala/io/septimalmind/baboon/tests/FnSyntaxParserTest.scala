@@ -2,7 +2,7 @@ package io.septimalmind.baboon.tests
 
 import fastparse.*
 import io.septimalmind.baboon.parser.ParserContext
-import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, FSPath, RawDefaultValue, RawDto, RawDtoMember, RawFieldName, RawFn, RawLocatorSeg, RawMigrate, RawTypeName, RawTypeRef}
+import io.septimalmind.baboon.parser.model.{BodyExpr, BodyLiteral, FSPath, RawCaptureStep, RawDefaultValue, RawDto, RawDtoMember, RawFieldName, RawFn, RawLocatorSeg, RawMigrate, RawStarCapture, RawTypeName, RawTypeRef}
 import izumi.fundamentals.collections.nonempty.NEString
 import org.scalatest.wordspec.AnyWordSpec
 
@@ -162,21 +162,21 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       assert(fn.captures.size == 1)
       val cap = fn.captures.head
       assert(cap.name == "s")
-      val star = cap.star.getOrElse(fail("expected star capture"))
-      assert(star.chainName == "chain")
-      assert(star.steps == List(
-        RawLocatorSeg.Field("objs"),
-        RawLocatorSeg.Key("idx"),
+      assert(cap.path == List(
+        RawCaptureStep.Star(RawStarCapture("chain", List(
+          RawLocatorSeg.Field("objs"),
+          RawLocatorSeg.Key("idx"),
+        ))),
       ))
     }
 
     "parse a locator with a key segment" in {
       val f = onlyField("data D { @default(fn[p: Parent.entries[$k].prop]() { p }) x: str }")
       val fn = unwrapFn(f.field.default)
-      assert(fn.captures.head.locator == List(
-        RawLocatorSeg.Field("entries"),
-        RawLocatorSeg.Key("k"),
-        RawLocatorSeg.Field("prop"),
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("entries")),
+        RawCaptureStep.Single(RawLocatorSeg.Key("k")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("prop")),
       ))
     }
 
@@ -210,13 +210,13 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       val f = onlyField("data D { @default(fn[s: MyStruct($chain* : .objs[$idx]).prop]() { s }) x: str }")
       val fn = unwrapFn(f.field.default)
       val cap = fn.captures.head
-      val star = cap.star.getOrElse(fail("expected star capture"))
-      assert(star.chainName == "chain")
-      assert(star.steps == List(
-        RawLocatorSeg.Field("objs"),
-        RawLocatorSeg.Key("idx"),
+      assert(cap.path == List(
+        RawCaptureStep.Star(RawStarCapture("chain", List(
+          RawLocatorSeg.Field("objs"),
+          RawLocatorSeg.Key("idx"),
+        ))),
+        RawCaptureStep.Single(RawLocatorSeg.Field("prop")),
       ))
-      assert(cap.locator == List(RawLocatorSeg.Field("prop")))
     }
 
     "parse nested method chains" in {
@@ -562,32 +562,32 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse multi-segment locator with multiple keys" in {
       val f = onlyField("data D { @default(fn[p: Parent.a.b[$k1].c[$k2].d]() { p }) x: str }")
       val fn = unwrapFn(f.field.default)
-      assert(fn.captures.head.locator == List(
-        RawLocatorSeg.Field("a"),
-        RawLocatorSeg.Field("b"),
-        RawLocatorSeg.Key("k1"),
-        RawLocatorSeg.Field("c"),
-        RawLocatorSeg.Key("k2"),
-        RawLocatorSeg.Field("d"),
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("a")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("b")),
+        RawCaptureStep.Single(RawLocatorSeg.Key("k1")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("c")),
+        RawCaptureStep.Single(RawLocatorSeg.Key("k2")),
+        RawCaptureStep.Single(RawLocatorSeg.Field("d")),
       ))
     }
 
     "parse multi-step star captures with chainName variations" in {
       val f = onlyField("data D { @default(fn[s: MyStruct($items* : .groups[$g].members[$m])]() { s }) x: str }")
-      val star = unwrapFn(f.field.default).captures.head.star.getOrElse(fail("expected star capture"))
-      assert(star.chainName == "items")
-      assert(star.steps == List(
-        RawLocatorSeg.Field("groups"),
-        RawLocatorSeg.Key("g"),
-        RawLocatorSeg.Field("members"),
-        RawLocatorSeg.Key("m"),
+      assert(unwrapFn(f.field.default).captures.head.path == List(
+        RawCaptureStep.Star(RawStarCapture("items", List(
+          RawLocatorSeg.Field("groups"),
+          RawLocatorSeg.Key("g"),
+          RawLocatorSeg.Field("members"),
+          RawLocatorSeg.Key("m"),
+        ))),
       ))
       val g = onlyField("data D { @default(fn[s: MyStruct($row* : .objs[$idx])]() { s }) x: str }")
-      val gstar = unwrapFn(g.field.default).captures.head.star.getOrElse(fail("expected star capture"))
-      assert(gstar.chainName == "row")
-      assert(gstar.steps == List(
-        RawLocatorSeg.Field("objs"),
-        RawLocatorSeg.Key("idx"),
+      assert(unwrapFn(g.field.default).captures.head.path == List(
+        RawCaptureStep.Star(RawStarCapture("row", List(
+          RawLocatorSeg.Field("objs"),
+          RawLocatorSeg.Key("idx"),
+        ))),
       ))
     }
 
@@ -680,6 +680,39 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "reject single = typo and bare double unary" in {
       expectParseFailure("data D { @default(fn[self: Self]() { a = b }) x: str }")
       expectParseFailure("data D { @default(fn[self: Self]() { !!a }) x: str }")
+    }
+
+    "parse two stars separated by a field, preserving order" in {
+      val f = onlyField("data D { @default(fn[a: T($c1* : .x).b($c2* : .y)]() { a }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Star(RawStarCapture("c1", List(RawLocatorSeg.Field("x")))),
+        RawCaptureStep.Single(RawLocatorSeg.Field("b")),
+        RawCaptureStep.Star(RawStarCapture("c2", List(RawLocatorSeg.Field("y")))),
+      ))
+    }
+
+    "parse field-star-field ordering preserved" in {
+      val f = onlyField("data D { @default(fn[a: T.f($c* : .x).g]() { a }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("f")),
+        RawCaptureStep.Star(RawStarCapture("c", List(RawLocatorSeg.Field("x")))),
+        RawCaptureStep.Single(RawLocatorSeg.Field("g")),
+      ))
+    }
+
+    "parse leading field then star then trailing key locator" in {
+      val f = onlyField("data D { @default(fn[a: T.root($c* : .items[$i]).tail]() { a }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.path == List(
+        RawCaptureStep.Single(RawLocatorSeg.Field("root")),
+        RawCaptureStep.Star(RawStarCapture("c", List(
+          RawLocatorSeg.Field("items"),
+          RawLocatorSeg.Key("i"),
+        ))),
+        RawCaptureStep.Single(RawLocatorSeg.Field("tail")),
+      ))
     }
 
   }
