@@ -1,0 +1,50 @@
+# power_arch1 — Python execution provenance (uv)
+
+All study scripts in this directory execute under `uv` from the parent
+checkout root (`/Users/dwinkelman/Code/baboon-test`, which owns
+`pyproject.toml` / `uv.lock` / `.venv`). Do NOT run them with bare
+`python3` / `python`; always use `uv run --project <checkout-root> python ...`
+so the locked interpreter + environment apply. The toolchain fixes
+(`BaboonTranslator`, `FnDepGraphBuilder`) are untouched by this change.
+
+## Toolchain
+
+- `uv 0.7.19 (38ee6ec80 2025-07-02)`
+- `Python 3.13.5` (via `uv run --project /Users/dwinkelman/Code/baboon-test python --version`; `.python-version` pins `3.13`)
+- `.venv` already existed at the checkout root, so it was NOT recreated.
+  `uv venv` was unnecessary; the environment was ensured non-destructively with:
+
+```sh
+uv sync --project /Users/dwinkelman/Code/baboon-test
+# Resolved 8 packages ... Audited 7 packages (no changes needed)
+```
+
+## Exact commands (run from the checkout root `/Users/dwinkelman/Code/baboon-test`)
+
+```sh
+uv run --project /Users/dwinkelman/Code/baboon-test python --version
+uv run --project /Users/dwinkelman/Code/baboon-test python baboon/studies/power_arch1/study_golden.py
+uv run --project /Users/dwinkelman/Code/baboon-test python baboon/studies/power_arch1/study_freq_sweep.py
+uv run --project /Users/dwinkelman/Code/baboon-test python baboon/studies/power_arch1/study_cores_plus1.py
+uv run --project /Users/dwinkelman/Code/baboon-test python baboon/studies/power_arch1/study_derate.py
+```
+
+(`python <relative path>` works because Python puts the script's own
+directory first on `sys.path`, so `import power_model` / `import study_common`
+resolve; outputs are written next to the scripts via `study_common.emit`.)
+
+Optional differential check (also under uv, same pattern):
+
+```sh
+uv run --project /Users/dwinkelman/Code/baboon-test python baboon/studies/power_arch1/run_codegen_check.py
+```
+
+## Re-run verdict (2026-11-19, under uv)
+
+- `study_golden.py`: 11/11 checks passed, exit 0
+- `study_freq_sweep.py`: 9/9 checks passed, exit 0
+- `study_cores_plus1.py`: 7/7 checks passed, exit 0
+- `study_derate.py`: 27/27 checks passed, exit 0
+- Output identity: sha256 of `results_*.json`, `provenance_*.json`, and
+  `golden_expected.json` before vs after the uv re-run are all identical
+  (bit-for-bit; no diffs). Provenance `results_hash` fields unchanged.

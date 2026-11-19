@@ -1,0 +1,26 @@
+{
+  "data_versions": {
+    "leak": "leak-nominal-v1",
+    "meff": "meff-v1",
+    "vf": "vf-v1"
+  },
+  "inputs": {
+    "desc": "nominal point",
+    "inputs": {
+      "arch": "Arch(cores=4.0, cacheMB=8.0, memCfg='ddr5-1ch')",
+      "base_ceff": "5e-10",
+      "bw_peak": "50000000000.0",
+      "bytes_per_task": "4000000000.0",
+      "ipc": "2.0",
+      "op": "OpPoint(voltage=0.9, freq=2800000000.0, temp=340.0)",
+      "ops_per_task": "1000000000.0",
+      "pcap": "60.0",
+      "scalars": "Scalars(ceffMult=1.0, leakMult=1.0, perfAdj=1.0)",
+      "tmax": "360.0",
+      "workload": "Workload(activity=0.5, memIntensity=0.5)"
+    }
+  },
+  "model_version": "power.arch1@1.0.0",
+  "results_hash": "28ab9c0721c11430c077e9d57c9202281b21b29c48fe35955bb870f860882af6",
+  "study": "golden"
+}

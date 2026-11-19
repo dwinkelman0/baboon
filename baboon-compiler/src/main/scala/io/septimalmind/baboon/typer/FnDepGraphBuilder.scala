@@ -121,7 +121,12 @@ object FnDepGraphBuilder {
 
     // -- read-after-write fn -> fn edges (slot granularity + shape overlap) ------
     for (b <- inputs; a <- inputs) {
-      if (overlaps(b.read, a.write))
+      // Shape-only self-overlap is vacuous (a fn trivially
+      // runs "after" itself). for-in/match over an own-DTO collection puts the
+      // owner in shapeReads while the attachment-slot write shares that root,
+      // so without this guard every such fn self-cycles. Same-slot self-reads
+      // stay hard errors (R10): only the shape-only self case is skipped.
+      if (overlaps(b.read, a.write) && (b.id != a.id || slotOverlaps(b.read, a.write)))
         edges += DepEdge(DepNode.Fn(b.id), DepNode.Fn(a.id), DepKind.ReadAfter)
     }
 
@@ -154,11 +159,17 @@ object FnDepGraphBuilder {
   /** B reads something A writes: same slot (root + head segment) or a shape overlap
     * (B's `shapeReads` holds an owner A writes to). `prevReads` count as reads.
     */
-  private def overlaps(b: Sensitivity, a: Sensitivity): Boolean = {
+  private def overlaps(b: Sensitivity, a: Sensitivity): Boolean =
+    slotOverlaps(b, a) ||
+      b.shapeReads.exists(o => a.leafReads.exists(_.root == o))
+
+  /** Slot-granularity half of [[overlaps]], factored out so
+    * the builder can keep same-slot self-reads as hard errors while ignoring
+    * vacuous shape-only self-edges (see call site). */
+  private def slotOverlaps(b: Sensitivity, a: Sensitivity): Boolean = {
     val bReads = b.leafReads.map(slotKey) ++ b.prevReads.map(u => (u, None))
     val aWrites = a.leafReads.map(slotKey)
-    (bReads intersect aWrites).nonEmpty ||
-      b.shapeReads.exists(o => a.leafReads.exists(_.root == o))
+    (bReads intersect aWrites).nonEmpty
   }
 
   private def slotKey(p: SchemaPath): (TypeId.User, Option[String]) =
