@@ -59,6 +59,23 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     assert(tpe == RawTypeRef.Simple(RawTypeName(name), Nil), s"expected simple type $name, got $tpe")
   }
 
+  private def expectParseFailure(source: String): Unit = {
+    val c = ctx(source)
+    try {
+      fastparse.parse(c.content, c.defDto.dtoEnclosed(_)) match {
+        case _: Parsed.Failure =>
+          succeed
+        case Parsed.Success(_, idx) if idx != source.length =>
+          succeed // dto did not accept the whole source
+        case Parsed.Success(v, _) =>
+          fail(s"expected parse failure for [$source], got success: $v")
+      }
+    } catch {
+      case _: IllegalArgumentException =>
+        succeed // method-whitelist guard rejects from inside the parser
+    }
+  }
+
   "context-function syntax" should {
 
     "parse @default(fn[p: Parent]() { p.name })" in {
@@ -174,6 +191,495 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       val f = onlyField("data D { @default(fn[self: Self]() { if self.x { 1 } else { 2 } }) x: str }")
       val fn = unwrapFn(f.field.default)
       assert(fn.body.result.isInstanceOf[BodyExpr.If])
+    }
+
+    "parse multi-capture fn[a: A, b: B](x: X) { x }" in {
+      val f = onlyField("data D { @default(fn[a: A, b: B](x: X) { x }) y: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.size == 2)
+      assert(fn.captures.map(_.name) == List("a", "b"))
+      assertSimpleType(fn.captures.head.rootType, "A")
+      assertSimpleType(fn.captures.tail.head.rootType, "B")
+      assert(fn.params.size == 1)
+      assert(fn.params.head.name == "x")
+      assertSimpleType(fn.params.head.tpe, "X")
+      assert(fn.body.result == BodyExpr.Path("x", Nil))
+    }
+
+    "parse star capture with trailing locator" in {
+      val f = onlyField("data D { @default(fn[s: MyStruct($chain* : .objs[$idx]).prop]() { s }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      val cap = fn.captures.head
+      val star = cap.star.getOrElse(fail("expected star capture"))
+      assert(star.chainName == "chain")
+      assert(star.steps == List(
+        RawLocatorSeg.Field("objs"),
+        RawLocatorSeg.Key("idx"),
+      ))
+      assert(cap.locator == List(RawLocatorSeg.Field("prop")))
+    }
+
+    "parse nested method chains" in {
+      val f = onlyField("data D { @default(fn[s: S]() { s.trim().uppercase() }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.Call(
+        BodyExpr.Call(BodyExpr.Path("s", Nil), "trim", Nil),
+        "uppercase",
+        Nil,
+      ))
+    }
+
+    "parse operator precedence in 1 + 2 * 3" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { 1 + 2 * 3 }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "+",
+        BodyExpr.Lit(BodyLiteral.IntLit(1)),
+        BodyExpr.BinOp(
+          "*",
+          BodyExpr.Lit(BodyLiteral.IntLit(2)),
+          BodyExpr.Lit(BodyLiteral.IntLit(3)),
+        ),
+      ))
+    }
+
+    "parse unary with parens" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { -(1 + 2) }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.UnaryOp(
+        "-",
+        BodyExpr.BinOp(
+          "+",
+          BodyExpr.Lit(BodyLiteral.IntLit(1)),
+          BodyExpr.Lit(BodyLiteral.IntLit(2)),
+        ),
+      ))
+    }
+
+    "parse @normalize with let and if/else" in {
+      val f = onlyField("data D { @normalize(fn[t: T](self: Self) { let v = self.x; if v { 1 } else { 2 } }) x: str }")
+      val fn = f.field.normalize.getOrElse(fail("expected normalize fn"))
+      assert(fn.body.letBindings == List(("v", BodyExpr.Path("self", List(BodyExpr.Segment.Field("x"))))))
+      assert(fn.body.result.isInstanceOf[BodyExpr.If])
+    }
+
+    "parse fn property with captures" in {
+      val p = onlyProperty("data D { area: f32 = fn[p: Parent](self: Self) { self.width } }")
+      val fn = unwrapFn(p.field.default)
+      assert(fn.captures.size == 1)
+      assert(fn.captures.head.name == "p")
+      assertSimpleType(fn.captures.head.rootType, "Parent")
+      assert(fn.params.size == 1)
+      assert(fn.params.head.name == "self")
+      assert(fn.body.result == BodyExpr.Path("self", List(BodyExpr.Segment.Field("width"))))
+    }
+
+    "reject unclosed fn" in {
+      expectParseFailure("data D { @default(fn[a: A](x: X { x }) y: str }")
+    }
+
+    "reject star with no steps" in {
+      expectParseFailure("data D { @default(fn[s: T($c* :)]() { s }) x: str }")
+    }
+
+    "reject non-whitelisted method call" in {
+      val err = intercept[IllegalArgumentException] {
+        parseDto("data D { @default(fn[s: S]() { s.foo() }) x: str }")
+      }
+      assert(err.getMessage.contains("foo"), s"unexpected message: ${err.getMessage}")
+    }
+
+    "reject empty fn body" in {
+      expectParseFailure("data D { @default(fn[a: A]() { }) x: str }")
+    }
+
+    "reject @migrate without source list brackets" in {
+      expectParseFailure("data D { @migrate(fn[old: S]() { old }) x: str }")
+    }
+
+    "parse || binding looser than &&" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a || b && c }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "||",
+        BodyExpr.Path("a", Nil),
+        BodyExpr.BinOp(
+          "&&",
+          BodyExpr.Path("b", Nil),
+          BodyExpr.Path("c", Nil),
+        ),
+      ))
+    }
+
+    "parse || as left-associative" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a || b || c }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "||",
+        BodyExpr.BinOp("||", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+        BodyExpr.Path("c", Nil),
+      ))
+    }
+
+    "parse == and != as left-associative" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a == b != c }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "!=",
+        BodyExpr.BinOp("==", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+        BodyExpr.Path("c", Nil),
+      ))
+    }
+
+    "parse comparison operators" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a < b <= c }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "<=",
+        BodyExpr.BinOp("<", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+        BodyExpr.Path("c", Nil),
+      ))
+      val g = onlyField("data D { @default(fn[self: Self]() { x > y >= z }) x: str }")
+      val gfn = unwrapFn(g.field.default)
+      assert(gfn.body.result == BodyExpr.BinOp(
+        ">=",
+        BodyExpr.BinOp(">", BodyExpr.Path("x", Nil), BodyExpr.Path("y", Nil)),
+        BodyExpr.Path("z", Nil),
+      ))
+    }
+
+    "parse + and - as left-associative (a-b-c)" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a - b - c }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "-",
+        BodyExpr.BinOp("-", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+        BodyExpr.Path("c", Nil),
+      ))
+      val g = onlyField("data D { @default(fn[self: Self]() { a - b + c }) x: str }")
+      val gfn = unwrapFn(g.field.default)
+      assert(gfn.body.result == BodyExpr.BinOp(
+        "+",
+        BodyExpr.BinOp("-", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+        BodyExpr.Path("c", Nil),
+      ))
+    }
+
+    "parse *, / and % as left-associative" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a * b / c % d }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "%",
+        BodyExpr.BinOp(
+          "/",
+          BodyExpr.BinOp("*", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+          BodyExpr.Path("c", Nil),
+        ),
+        BodyExpr.Path("d", Nil),
+      ))
+    }
+
+    "parse mixed precedence in a + b * c - d" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a + b * c - d }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "-",
+        BodyExpr.BinOp(
+          "+",
+          BodyExpr.Path("a", Nil),
+          BodyExpr.BinOp("*", BodyExpr.Path("b", Nil), BodyExpr.Path("c", Nil)),
+        ),
+        BodyExpr.Path("d", Nil),
+      ))
+    }
+
+    "parse nested parens ((a + b) * (c - d))" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { ((a + b) * (c - d)) }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.BinOp(
+        "*",
+        BodyExpr.BinOp("+", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
+        BodyExpr.BinOp("-", BodyExpr.Path("c", Nil), BodyExpr.Path("d", Nil)),
+      ))
+    }
+
+    "parse unary !, - and doubled forms through parens" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { !flag }) x: str }")
+      assert(unwrapFn(f.field.default).body.result == BodyExpr.UnaryOp("!", BodyExpr.Path("flag", Nil)))
+      val g = onlyField("data D { @default(fn[self: Self]() { -x }) x: str }")
+      assert(unwrapFn(g.field.default).body.result == BodyExpr.UnaryOp("-", BodyExpr.Path("x", Nil)))
+      val h = onlyField("data D { @default(fn[self: Self]() { !(!a) }) x: str }")
+      assert(unwrapFn(h.field.default).body.result ==
+        BodyExpr.UnaryOp("!", BodyExpr.UnaryOp("!", BodyExpr.Path("a", Nil))))
+      val k = onlyField("data D { @default(fn[self: Self]() { -(-a) }) x: str }")
+      assert(unwrapFn(k.field.default).body.result ==
+        BodyExpr.UnaryOp("-", BodyExpr.UnaryOp("-", BodyExpr.Path("a", Nil))))
+    }
+
+    "parse nested if/else" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { if a { if b { 1 } else { 2 } } else { 3 } }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.If(
+        BodyExpr.Path("a", Nil),
+        BodyExpr.If(
+          BodyExpr.Path("b", Nil),
+          BodyExpr.Lit(BodyLiteral.IntLit(1)),
+          BodyExpr.Lit(BodyLiteral.IntLit(2)),
+        ),
+        BodyExpr.Lit(BodyLiteral.IntLit(3)),
+      ))
+    }
+
+    "parse every literal kind, escapes and == on strings" in {
+      def resultOf(body: String): BodyExpr = {
+        val f = onlyField(s"data D { @default(fn[self: Self]() { $body }) x: str }")
+        unwrapFn(f.field.default).body.result
+      }
+      assert(resultOf("42") == BodyExpr.Lit(BodyLiteral.IntLit(42)))
+      assert(resultOf("3.14") == BodyExpr.Lit(BodyLiteral.FloatLit(3.14)))
+      assert(resultOf("true") == BodyExpr.Lit(BodyLiteral.BoolLit(true)))
+      assert(resultOf("false") == BodyExpr.Lit(BodyLiteral.BoolLit(false)))
+      assert(resultOf("null") == BodyExpr.Lit(BodyLiteral.NullLit))
+      assert(resultOf("\"hi\"") == BodyExpr.Lit(BodyLiteral.StrLit("hi")))
+      // escaped newline / quote must survive the string literal parser
+      resultOf("\"a\\nb\"") match {
+        case BodyExpr.Lit(BodyLiteral.StrLit(v)) => assert(v.contains("a") && v.contains("b"))
+        case other => fail(s"expected StrLit, got $other")
+      }
+      resultOf("\"q\\\"q\"") match {
+        case BodyExpr.Lit(BodyLiteral.StrLit(v)) => assert(v.contains("q"))
+        case other => fail(s"expected StrLit, got $other")
+      }
+      assert(resultOf("\"a\" == \"b\"") == BodyExpr.BinOp(
+        "==",
+        BodyExpr.Lit(BodyLiteral.StrLit("a")),
+        BodyExpr.Lit(BodyLiteral.StrLit("b")),
+      ))
+    }
+
+    "parse every method-whitelist entry" in {
+      def callOf(body: String): BodyExpr.Call = {
+        val f = onlyField(s"data D { @default(fn[s: S]() { $body }) x: str }")
+        unwrapFn(f.field.default).body.result match {
+          case c: BodyExpr.Call => c
+          case other => fail(s"expected Call for [$body], got $other")
+        }
+      }
+      List("uppercase", "lowercase", "capitalize", "trim", "toString", "length").foreach { m =>
+        val c = callOf(s"s.$m()")
+        assert(c.method == m && c.args.isEmpty, s"no-arg call $m parsed as $c")
+      }
+      List("split", "join", "contains", "startsWith", "endsWith").foreach { m =>
+        val c = callOf(s"s.$m(\"x\")")
+        assert(c.method == m && c.args.size == 1, s"one-arg call $m parsed as $c")
+      }
+      val concat = callOf("s.concat(t)")
+      assert(concat.method == "concat" && concat.args == List(BodyExpr.Path("t", Nil)))
+      List("abs", "floor", "ceil", "round").foreach { m =>
+        val c = callOf(s"n.$m()")
+        assert(c.method == m && c.args.isEmpty, s"numeric call $m parsed as $c")
+      }
+      List("min", "max").foreach { m =>
+        val c = callOf(s"a.$m(b)")
+        assert(c.method == m && c.args == List(BodyExpr.Path("b", Nil)), s"numeric call $m parsed as $c")
+      }
+    }
+
+    "parse dotted field chains" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a.b.c.d }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.Path("a", List(
+        BodyExpr.Segment.Field("b"),
+        BodyExpr.Segment.Field("c"),
+        BodyExpr.Segment.Field("d"),
+      )))
+    }
+
+    "parse index segments with int, var and expr bodies" in {
+      val i = onlyField("data D { @default(fn[self: Self]() { a[0] }) x: str }")
+      assert(unwrapFn(i.field.default).body.result ==
+        BodyExpr.Path("a", List(BodyExpr.Segment.Index(BodyExpr.Lit(BodyLiteral.IntLit(0))))))
+      val v = onlyField("data D { @default(fn[self: Self]() { a[idx] }) x: str }")
+      assert(unwrapFn(v.field.default).body.result ==
+        BodyExpr.Path("a", List(BodyExpr.Segment.Index(BodyExpr.Path("idx", Nil)))))
+      val e = onlyField("data D { @default(fn[self: Self]() { a[idx + 1] }) x: str }")
+      assert(unwrapFn(e.field.default).body.result == BodyExpr.Path("a", List(
+        BodyExpr.Segment.Index(BodyExpr.BinOp(
+          "+",
+          BodyExpr.Path("idx", Nil),
+          BodyExpr.Lit(BodyLiteral.IntLit(1)),
+        )),
+      )))
+    }
+
+    "parse mixed a.b[0].c and method call after index" in {
+      val f = onlyField("data D { @default(fn[self: Self]() { a.b[0].c }) x: str }")
+      assert(unwrapFn(f.field.default).body.result == BodyExpr.Path("a", List(
+        BodyExpr.Segment.Field("b"),
+        BodyExpr.Segment.Index(BodyExpr.Lit(BodyLiteral.IntLit(0))),
+        BodyExpr.Segment.Field("c"),
+      )))
+      val g = onlyField("data D { @default(fn[self: Self]() { a[0].trim() }) x: str }")
+      assert(unwrapFn(g.field.default).body.result == BodyExpr.Call(
+        BodyExpr.Path("a", List(BodyExpr.Segment.Index(BodyExpr.Lit(BodyLiteral.IntLit(0))))),
+        "trim",
+        Nil,
+      ))
+    }
+
+    "parse empty, params-only and captures-only fn headers" in {
+      val e = onlyField("data D { @default(fn() { 1 }) x: str }")
+      val efn = unwrapFn(e.field.default)
+      assert(efn.captures.isEmpty && efn.params.isEmpty)
+      assert(efn.body.result == BodyExpr.Lit(BodyLiteral.IntLit(1)))
+      val p = onlyField("data D { @default(fn(self: Self) { self.x }) x: str }")
+      val pfn = unwrapFn(p.field.default)
+      assert(pfn.captures.isEmpty && pfn.params.size == 1)
+      assert(pfn.params.head.name == "self")
+      val c = onlyField("data D { @default(fn[q: Q]() { q }) x: str }")
+      val cfn = unwrapFn(c.field.default)
+      assert(cfn.captures.size == 1 && cfn.params.isEmpty)
+      assert(cfn.captures.head.name == "q")
+    }
+
+    "parse rootType with type args" in {
+      val f = onlyField("data D { @default(fn[b: Box[T]]() { b }) x: str }")
+      unwrapFn(f.field.default).captures.head.rootType match {
+        case RawTypeRef.Constructor(name, args, _) =>
+          assert(name.name == "Box")
+          assert(args.toList == List(RawTypeRef.Simple(RawTypeName("T"), Nil)))
+        case other => fail(s"expected Constructor Box[T], got $other")
+      }
+      val g = onlyField("data D { @default(fn[m: Map[K, V]]() { m }) x: str }")
+      unwrapFn(g.field.default).captures.head.rootType match {
+        case RawTypeRef.Constructor(name, args, _) =>
+          assert(name.name == "Map")
+          assert(args.toList.size == 2)
+        case other => fail(s"expected Constructor Map[K, V], got $other")
+      }
+    }
+
+    "parse multi-segment locator with multiple keys" in {
+      val f = onlyField("data D { @default(fn[p: Parent.a.b[$k1].c[$k2].d]() { p }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.captures.head.locator == List(
+        RawLocatorSeg.Field("a"),
+        RawLocatorSeg.Field("b"),
+        RawLocatorSeg.Key("k1"),
+        RawLocatorSeg.Field("c"),
+        RawLocatorSeg.Key("k2"),
+        RawLocatorSeg.Field("d"),
+      ))
+    }
+
+    "parse multi-step star captures with chainName variations" in {
+      val f = onlyField("data D { @default(fn[s: MyStruct($items* : .groups[$g].members[$m])]() { s }) x: str }")
+      val star = unwrapFn(f.field.default).captures.head.star.getOrElse(fail("expected star capture"))
+      assert(star.chainName == "items")
+      assert(star.steps == List(
+        RawLocatorSeg.Field("groups"),
+        RawLocatorSeg.Key("g"),
+        RawLocatorSeg.Field("members"),
+        RawLocatorSeg.Key("m"),
+      ))
+      val g = onlyField("data D { @default(fn[s: MyStruct($row* : .objs[$idx])]() { s }) x: str }")
+      val gstar = unwrapFn(g.field.default).captures.head.star.getOrElse(fail("expected star capture"))
+      assert(gstar.chainName == "row")
+      assert(gstar.steps == List(
+        RawLocatorSeg.Field("objs"),
+        RawLocatorSeg.Key("idx"),
+      ))
+    }
+
+    "parse @default literal, lone @normalize and @migrate arities" in {
+      val lit = parseDto("data D { @default(\"lit\") a: str\n @default(42) b: i32 }")
+      assert(lit.members.size == 2)
+      lit.members.head match {
+        case RawDtoMember.FieldDef(field, _) =>
+          assert(field.default.contains(RawDefaultValue.StrLit("lit")))
+        case other => fail(s"expected FieldDef, got $other")
+      }
+      lit.members.tail.head match {
+        case RawDtoMember.FieldDef(field, _) =>
+          assert(field.default.contains(RawDefaultValue.IntLit(42, "42")))
+        case other => fail(s"expected FieldDef, got $other")
+      }
+      val n = onlyField("data D { @normalize(fn[t: T](self: Self) { self }) x: str }")
+      assert(n.field.normalize.isDefined)
+      assert(n.field.default.isEmpty)
+      val zero = onlyField("data D { @migrate(fn[old: S]() { old }, []) x: str }")
+      assert(zero.field.migrate.getOrElse(fail("expected migrate")).sources.isEmpty)
+      val one = onlyField("data D { @migrate(fn[old: S]() { old }, [S.field]) x: str }")
+      assert(one.field.migrate.getOrElse(fail("expected migrate")).sources == List("S.field"))
+      val many = onlyField("data D { @migrate(fn[old: S]() { old }, [\n S.a,\n S.b.c,\n S.d\n ]) x: str }")
+      assert(many.field.migrate.getOrElse(fail("expected migrate")).sources == List("S.a", "S.b.c", "S.d"))
+    }
+
+    "parse @normalize coexisting with an = fn property" in {
+      val p = onlyProperty("data D { @normalize(fn[t: T](self: Self) { self }) area: f32 = fn(self: Self) { self.width } }")
+      assert(p.field.normalize.isDefined)
+      val fn = unwrapFn(p.field.default)
+      assert(fn.params.size == 1)
+      assert(fn.body.result == BodyExpr.Path("self", List(BodyExpr.Segment.Field("width"))))
+    }
+
+    "parse multiline fn bodies and let shadowing" in {
+      val f = onlyField("data D {\n @default(fn[p: Parent]() {\n let a = p.name;\n a.uppercase()\n }) x: str\n }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.letBindings.size == 1)
+      assert(fn.body.result == BodyExpr.Call(
+        BodyExpr.Path("a", Nil),
+        "uppercase",
+        Nil,
+      ))
+      val s = onlyField("data D { @default(fn[self: Self]() { let x = 1; let x = 2; x }) x: str }")
+      val sfn = unwrapFn(s.field.default)
+      assert(sfn.body.letBindings == List(
+        ("x", BodyExpr.Lit(BodyLiteral.IntLit(1))),
+        ("x", BodyExpr.Lit(BodyLiteral.IntLit(2))),
+      ))
+      assert(sfn.body.result == BodyExpr.Path("x", Nil))
+    }
+
+    "parse suffix //! docs after an fn field" in {
+      val f = onlyField("data D { @default(fn[a: A]() { a }) x: str //! some docs\n }")
+      assert(f.field.name == RawFieldName("x"))
+      assertSimpleType(f.field.tpe, "str")
+    }
+
+    "reject if without else and binop conditions" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { if a { 1 } }) x: str }")
+      expectParseFailure("data D { @default(fn[self: Self]() { if a == b { 1 } else { 2 } }) x: str }")
+    }
+
+    "reject let without semicolon and trailing semicolon on result" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { let a = 1 a }) x: str }")
+      expectParseFailure("data D { @default(fn[self: Self]() { 1; }) x: str }")
+      expectParseFailure("data D { @default(fn[self: Self]() { let a = 1;; a }) x: str }")
+    }
+
+    "reject unmatched delimiters, unclosed fn[ and bad captures" in {
+      expectParseFailure("data D { @default(fn[a: A]() { (a }) x: str }")
+      expectParseFailure("data D { @default(fn[a: A]() { a } x: str }")
+      expectParseFailure("data D { @default(fn[a: A]() { a[0 }) x: str }")
+      expectParseFailure("data D { @default(fn[a: A(x: X) { x }) y: str }")
+      expectParseFailure("data D { @default(fn[s: T($* : .a)]() { s }) x: str }")
+      expectParseFailure("data D { @default(fn[: T]() { 1 }) x: str }")
+      expectParseFailure("data D { @default(fn[s: T($c* :)]() { s }) x: str }")
+    }
+
+    "reject every non-whitelisted method with its name in the message" in {
+      List("foo", "bar", "doFoo", "compute", "frobnicate").foreach { m =>
+        val err = intercept[IllegalArgumentException] {
+          parseDto(s"data D { @default(fn[s: S]() { s.$m() }) x: str }")
+        }
+        assert(err.getMessage.contains(m), s"message [${err.getMessage}] should mention $m")
+      }
+    }
+
+    "reject single = typo and bare double unary" in {
+      expectParseFailure("data D { @default(fn[self: Self]() { a = b }) x: str }")
+      expectParseFailure("data D { @default(fn[self: Self]() { !!a }) x: str }")
     }
 
   }
