@@ -197,7 +197,8 @@ class ScJsonCodecGenerator(
   }
 
   private def genDtoBodies(name: ScValue.ScType, d: Typedef.Dto): (TextTree[ScValue], TextTree[ScValue]) = {
-    val fields = d.fields.map {
+    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    val fields = d.fields.filter(_.computed.isEmpty).map {
       f =>
         val escapedName = escapeScKeyword(f.name.name)
         val fieldRef    = q"value.$escapedName"
@@ -218,15 +219,16 @@ class ScJsonCodecGenerator(
       case _                                                      => mainEnc
     }
 
+    // prereq 4: computed fields are no-wire; wire emptiness/ctor use wire fields only.
     val decoderForExpr =
-      if (d.fields.nonEmpty) {
+      if (d.fields.filter(_.computed.isEmpty).nonEmpty) {
         q"""for {
            |  ${fields.map(_._2).joinN().shift(2).trim}
-           |} yield $name(${d.fields.map(f => escapeScKeyword(f.name.name)).mkString(",")})
+           |} yield $name(${d.fields.filter(_.computed.isEmpty).map(f => escapeScKeyword(f.name.name)).mkString(",")})
            |""".stripMargin
       } else q"Right($name())"
 
-    val jsonObjectPattern = if (d.fields.nonEmpty) "jsonObject" else "_"
+    val jsonObjectPattern = if (d.fields.filter(_.computed.isEmpty).nonEmpty) "jsonObject" else "_"
     val decBody =
       q"""wire.asObject match {
          |  case Some($jsonObjectPattern) => ${decoderForExpr.shift(4).trim}

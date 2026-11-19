@@ -140,7 +140,8 @@ class RsJsonCodecGenerator(
     val what = name.name
     defn.defn match {
       case d: Typedef.Dto =>
-        val binds = d.fields.toList.map {
+        // prereq 4: computed fields are no-wire, excluded from JSON key set.
+        val binds = d.fields.toList.filter(_.computed.isEmpty).map {
           f =>
             val rsName  = toSnakeCase(f.name.name)
             val boxed   = representation.needsBox(f.tpe)
@@ -300,7 +301,8 @@ class RsJsonCodecGenerator(
   private def explicitEncoder(defn: DomainMember.User, name: RsValue.RsType): TextTree[RsValue] = {
     defn.defn match {
       case d: Typedef.Dto =>
-        val inserts = d.fields.toList.map {
+        // prereq 4: computed fields are no-wire, excluded from JSON key set.
+        val inserts = d.fields.toList.filter(_.computed.isEmpty).map {
           f =>
             val wireName = f.name.name
             // A recursive field is stored behind a `Box`; deref so the walk sees the value's

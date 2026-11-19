@@ -299,11 +299,18 @@ object BaboonSchemeRenderer {
     ): Unit = {
       val derivations = renderClauses(member, domain)
       sb.append(s"$indent${rootPrefix}data ${dto.id.name.name}$derivations {\n")
-      dto.fields.foreach {
+      // prereq 4: computed fields are no-wire; render wire fields first, then annotate
+      // computed separately so they never occupy a wire slot.
+      dto.fields.filter(_.computed.isEmpty).foreach {
         field =>
           val defaultPrefix = renderDefaultPrefix(field)
           val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
           sb.append(s"$indent  $defaultPrefix${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
+      }
+      dto.fields.filter(_.computed.isDefined).foreach {
+        field =>
+          val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
+          sb.append(s"$indent  // computed ${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause = fn(...)\n")
       }
       // `dto.fields` already holds each contract's fields where its `is` was declared, and a
       // reload inlines a contract's fields at its `is` and keeps the first copy: written after the
@@ -409,11 +416,17 @@ object BaboonSchemeRenderer {
         contractId =>
           sb.append(s"$indent  is ${contractId.name.name}\n")
       }
-      contract.fields.foreach {
+      // prereq 4: computed fields are no-wire; annotate separately.
+      contract.fields.filter(_.computed.isEmpty).foreach {
         field =>
           val defaultPrefix = renderDefaultPrefix(field)
           val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
           sb.append(s"$indent  $defaultPrefix${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
+      }
+      contract.fields.filter(_.computed.isDefined).foreach {
+        field =>
+          val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
+          sb.append(s"$indent  // computed ${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause = fn(...)\n")
       }
       sb.append(s"$indent}\n")
     }
@@ -461,11 +474,17 @@ object BaboonSchemeRenderer {
               member.defn match {
                 case dto: Typedef.Dto =>
                   sb.append(s"$indent      data $role {\n")
-                  dto.fields.foreach {
+                  // prereq 4: computed fields are no-wire; annotate separately.
+                  dto.fields.filter(_.computed.isEmpty).foreach {
                     field =>
                       val defaultPrefix = renderDefaultPrefix(field)
                       val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
                       sb.append(s"$indent          $defaultPrefix${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause\n")
+                  }
+                  dto.fields.filter(_.computed.isDefined).foreach {
+                    field =>
+                      val wasClause = field.prevName.map(pn => s" was ${pn.name}").getOrElse("")
+                      sb.append(s"$indent          // computed ${field.name.name}: ${renderTypeRef(field.tpe)}$wasClause = fn(...)\n")
                   }
                   sb.append(s"$indent      }\n")
                 case _ =>
@@ -485,7 +504,13 @@ object BaboonSchemeRenderer {
     }
 
     private def renderDefaultPrefix(field: Field): String = {
-      field.default.map(d => s"@default($d) ").getOrElse("")
+      field.default match {
+        // prereq 4: Field(default=Fn) is eval-only and never reaches the codec/wire;
+        // assert/skip so a fn literal is never emitted as a wire default.
+        case Some(FieldDefault.Fn(_)) => sys.error(s"FieldDefault.Fn for ${field.name.name} is eval-only and must not reach scheme rendering")
+        case Some(d)                   => s"@default($d) "
+        case None                      => ""
+      }
     }
 
     private def renderTypeRef(ref: TypeRef): String = ref match {

@@ -178,6 +178,14 @@ object BaboonValidator {
     ): F[NEList[BaboonIssue], Unit] = {
       import TypeId.Builtins
 
+      // Fn defaults are accepted on any field type (leaf scalar, opt, enum,
+      // containers lst/map/set, structs/ADTs): fn result conformance is
+      // already checked in P3 body typer vs the declared field type, so the
+      // literal leaf/type checks below must not apply to Fn.
+      if (default.isInstanceOf[FieldDefault.Fn]) {
+        return F.unit
+      }
+
       if (default == FieldDefault.NullVal && !field.tpe.isInstanceOf[TypeRef.Constructor]) {
         return F.fail(BaboonIssue.of(VerificationIssue.DefaultNullOnRequired(field, meta)))
       }

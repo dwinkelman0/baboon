@@ -345,7 +345,8 @@ object TsDefnTranslator {
 
       val implementsClause = if (parents.nonEmpty) q"implements ${parents.map(tpe => q"$tpe").join(", ")}" else q""
 
-      val toJsonFields = dto.fields.map {
+      // prereq 4: computed fields are no-wire, excluded from JSON key set (toJSON wire view).
+      val toJsonFields = dto.fields.filter(_.computed.isEmpty).map {
         f =>
           val ref = s"this._${f.name.name}"
           q"${f.name.name}: ${toJsonFieldExpr(f.tpe, ref)}"

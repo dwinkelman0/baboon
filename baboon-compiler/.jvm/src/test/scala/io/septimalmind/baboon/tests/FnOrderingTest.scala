@@ -1,9 +1,8 @@
 package io.septimalmind.baboon.tests
 
 import io.septimalmind.baboon.parser.model._
-import io.septimalmind.baboon.typer.{FnDepGraphBuilder, FnReadGate, FnSensitivityExtractor}
+import io.septimalmind.baboon.typer.{FnDepGraphBuilder, FnReadGate}
 import io.septimalmind.baboon.typer.FnDepGraphBuilder.{DepKind, DepNode, FnNodeId}
-import io.septimalmind.baboon.typer.FnSensitivityExtractor.{SchemaPath, Sensitivity}
 import io.septimalmind.baboon.typer.model._
 import io.septimalmind.baboon.typer.model.FnTypes.{ctor, scalar}
 import izumi.fundamentals.collections.nonempty.NEList
@@ -51,14 +50,18 @@ final class FnOrderingTest extends AnyWordSpec {
   // -- builders ---------------------------------------------------------------
 
   private def sp(owner: String, segs: String*): SchemaPath =
-    SchemaPath(uid(owner), segs.toList)
+    SchemaPath.resolve(uid(owner), segs.toList, schema) match {
+      case Right(p)  => p
+      case Left(err) => fail(s"bad expected path $owner.${segs.mkString(".")}: $err")
+    }
   private def slot(owner: String, f: String): SchemaPath = sp(owner, f)
 
   private def sens(
     reads: Set[SchemaPath] = Set.empty,
     writes: Set[SchemaPath] = Set.empty,
     shape: Set[TypeId.User] = Set.empty
-  ): Sensitivity = Sensitivity(reads, shape, Set.empty, writes)
+  ): (Sensitivity, Sensitivity) =
+    (Sensitivity(reads, shape, Set.empty), Sensitivity(writes, writes.map(_.root), Set.empty))
 
   private def rawFn: RawFn =
     RawFn(Nil, Nil, RawBody(Nil, BodyExpr.Lit(BodyLiteral.IntLit(0))))
@@ -73,20 +76,21 @@ final class FnOrderingTest extends AnyWordSpec {
     owner: String,
     f: String,
     role: FnRole,
-    s: Sensitivity,
+    s: (Sensitivity, Sensitivity),
     sources: Set[SchemaPath] = Set.empty
-  ): FnReadGate.Input = FnReadGate.Input(site(owner, f, role), bod, s, sources)
+  ): FnReadGate.Input = FnReadGate.Input(site(owner, f, role), bod, s._1, s._2, sources)
 
   private def depIn(
     owner: String,
     f: String,
     role: FnRole,
-    s: Sensitivity,
+    s: (Sensitivity, Sensitivity),
     captureOwner: Option[String] = None
   ): FnDepGraphBuilder.Input =
     FnDepGraphBuilder.Input(
       FnNodeId(uid(owner), f, role),
-      s,
+      s._1,
+      s._2,
       captureOwner.map(uid),
       FnReadGate.passOf(role)
     )
@@ -169,8 +173,12 @@ final class FnOrderingTest extends AnyWordSpec {
     }
 
     "reject unknown field reads" in {
+      val scope = SchemaPath.resolve(uid("Basket"), List("total"), schema).toOption.get
+      val badRead = SchemaPath(uid("Basket"), isPrev = false, List(
+        SchemaStep.FieldStep(FieldName("nope"), uid("Basket"), i32)
+      ))
       val ins = List(
-        gateIn("Basket", "total", FnRole.Default, sens(reads = Set(sp("Basket", "nope")), writes = Set(slot("Basket", "total"))))
+        gateIn("Basket", "total", FnRole.Default, (Sensitivity(Set(badRead), Set.empty, Set.empty), Sensitivity(Set(scope), Set(uid("Basket")), Set.empty)))
       )
       val errs = mustFailGate(ins)
       assert(errs.exists(e => e.contains("unknown field") && e.contains("nope")), errs.mkString("; "))
