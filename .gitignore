@@ -225,3 +225,6 @@ pubspec.lock
 
 # local-only working notes (not part of any ledger)
 notes.local.md
+
+# local plans (untracked)
+plans/
