@@ -25,7 +25,7 @@
       }
     ]
   },
-  "model_version": "power.arch1@1.0.0",
+  "model_version": "power.arch1@1.0.1",
   "results_hash": "82f0aea36f87f124df755c4ef2aa7d82b7fb5f5b133fa2241ddd5aedb9b866f5",
   "study": "freq_sweep"
 }

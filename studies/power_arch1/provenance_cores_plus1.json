@@ -9,7 +9,7 @@
     "N+1": 5.0,
     "fixed": "V=0.9 f=2.8GHz activity=0.5 intensity=0.5"
   },
-  "model_version": "power.arch1@1.0.0",
+  "model_version": "power.arch1@1.0.1",
   "results_hash": "fde55ff7475a6e62a4a8e7b306af064194b53f871bed7930c4a05a1db5434ec6",
   "study": "cores_plus1"
 }

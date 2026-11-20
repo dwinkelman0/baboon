@@ -881,9 +881,18 @@ def assert_trace(cond, vars_dict=None, msg=None):
     Evaluates to True so lowered defaults can sequence it inside an expression
     (``(assert_trace(...), value)[-1]``); raises AssertionError when `cond` is
     falsy, attaching the traced variables and the message.
+
+    `vars_dict` carries one entry per participating path (e.g.
+    ``{'self.opsPerTask': -1}``); indexed paths arrive with the index already
+    resolved in the key (e.g. ``{'element[4]': -2}``). The message lists each
+    entry as ``path: value`` so failures name only the involved values.
     """
     if not cond:
-        raise AssertionError(msg or f"baboon fn assertion failed: {vars_dict}")
+        if vars_dict:
+            detail = ", ".join(f"{k}: {v}" for k, v in vars_dict.items())
+        else:
+            detail = "{}"
+        raise AssertionError(msg or f"baboon fn assertion failed: {detail}")
     return True
 
 

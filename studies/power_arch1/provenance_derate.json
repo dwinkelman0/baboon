@@ -25,7 +25,7 @@
     ],
     "fixed": "golden point, scalars vary"
   },
-  "model_version": "power.arch1@1.0.0",
+  "model_version": "power.arch1@1.0.1",
   "results_hash": "a42ac93ccae5f3aad34b85eab043f6fd2ac9353baf3120d3509348f020427c2b",
   "study": "derate"
 }

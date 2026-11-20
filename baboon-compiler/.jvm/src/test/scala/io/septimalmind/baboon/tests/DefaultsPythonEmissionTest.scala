@@ -243,6 +243,11 @@ abstract class DefaultsPythonEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonTe
               defaultsRendering.contains("return \"hey\".upper()"),
             s"Expected computed property getter. Source:\n$defaultsRendering",
           )
+          assert(
+            defaultsRendering.contains("def curve(self, t: float) -> float:") &&
+              !defaultsRendering.contains("@property\n    def curve"),
+            s"Expected parameterized computed method (no @property). Source:\n$defaultsRendering",
+          )
         }
     }
   }

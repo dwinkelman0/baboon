@@ -95,6 +95,7 @@ object TypedExpr {
   final case class Lit(lit: TypedLit, tpe: TypeRef) extends TypedExpr
   final case class Path(root: String, segments: List[TypedPathSeg], tpe: TypeRef) extends TypedExpr
   final case class Call(target: TypedExpr, method: String, args: List[TypedExpr], tpe: TypeRef) extends TypedExpr
+  final case class UserCall(target: TypedExpr, method: String, args: List[TypedExpr], tpe: TypeRef) extends TypedExpr
   final case class BinOp(op: String, left: TypedExpr, right: TypedExpr, tpe: TypeRef) extends TypedExpr
   final case class UnaryOp(op: String, expr: TypedExpr, tpe: TypeRef) extends TypedExpr
   final case class If(cond: TypedExpr, thenE: TypedExpr, elseE: TypedExpr, tpe: TypeRef) extends TypedExpr
@@ -127,15 +128,17 @@ object TypedStmt {
 }
 
 /** P3 output for one assertion: `cond` must be `bit`, `msg` (when present)
-  * must be `str`. `capturedVars` records the distinct `Path` roots involved
-  * in `cond`, in first-occurrence order, for backend trace metadata.
+  * must be `str`. `capturedVars` records the distinct `Path`s involved
+  * in `cond`, in first-occurrence order, for backend trace metadata: full
+  * paths (e.g. `self.opsPerTask`, `element[i]`) so a failure reports only
+  * the participating values instead of dumping whole root objects.
   * `trace` is a backend slot (e.g. rendered message template); P3 leaves it
   * empty (`None`).
   */
 final case class TypedAssert(
   cond: TypedExpr,
   msg: Option[TypedExpr],
-  capturedVars: List[String],
+  capturedVars: List[TypedExpr.Path],
   trace: Option[String] = None,
 )
 
@@ -385,7 +388,7 @@ object FnTypes {
     case other                                   => conforms(other.tpe, actualIsIntLit = false, actualIsFloatLit = false, actualIsNull = false, expected)
   }
 
-  /** 18-method closed call table (mirrors the parser whitelist):
+  /** 18-method closed call table (typer-owned rejection: unknown method names are rejected here, not by the parser):
     * str: uppercase/lowercase/capitalize/trim/toString/length/split/join/
     * contains/startsWith/endsWith/concat; numeric: abs/floor/ceil/round/min/max.
     */
@@ -433,7 +436,8 @@ object FnTypes {
 case class TypedFn(
   capture: Option[TypedCapture],
   body: TypedBody,
-  expected: TypeRef
+  expected: TypeRef,
+  params: List[(String, TypeRef)] = Nil
 )
 
 case class TypedMigrate(fn: TypedFn)

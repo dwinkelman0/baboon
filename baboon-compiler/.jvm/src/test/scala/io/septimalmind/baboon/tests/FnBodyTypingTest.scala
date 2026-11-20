@@ -107,8 +107,14 @@ final class FnBodyTypingTest extends AnyWordSpec {
       case Left(err) => fail(s"expected success, got errors: ${err.mkString("; ")}")
     }
 
-  private def mustFail(
-    stmts: List[BodyStmt],
+  /** Display shape of a captured assert path: `self.count`, `a`, `self.tags[_]`. */
+  private def showVar(p: TypedExpr.Path): String =
+    p.root + p.segments.map {
+      case TypedPathSeg.Field(n, _) => s".$n"
+      case _: TypedPathSeg.Index   => "[_]"
+    }.mkString
+
+  private def mustFail(    stmts: List[BodyStmt],
     result: BodyExpr,
     scope: ScopeTable,
     expected: TypeRef,
@@ -246,6 +252,17 @@ final class FnBodyTypingTest extends AnyWordSpec {
         case Right(_)  => fail("expected duplicate binder failure")
       }
     }
+
+    "situate a capture path ending at the container itself" in {
+      val c = cap("s", "Child")
+      FnCaptureResolver.resolveCapture(c, schema) match {
+        case Right((typed, binds)) =>
+          assert(typed.endpoint == uref("Child"))
+          assert(typed.path.isEmpty)
+          assert(binds.toMap.get("s").contains(ScopeEntry.CaptureRoot(uref("Child"))))
+        case Left(err) => fail(s"expected success: ${err.mkString("; ")}")
+      }
+    }
   }
 
   "P3 body typing (positives)" should {
@@ -353,6 +370,19 @@ final class FnBodyTypingTest extends AnyWordSpec {
     "resolve a path through a set transparently" in {
       val sc = childScope("basket" -> ScopeEntry.Param(uref("Basket")))
       val b = mustType(Nil, path("basket", fld("bundles"), fld("sku")), sc, str)
+      assert(b.tpe == str)
+    }
+
+    "read sibling fields through a container self" in {
+      val b = mustType(Nil, path("self", fld("count")), childScope(), i32)
+      assert(b.tpe == i32)
+      val b2 = mustType(Nil, path("self", fld("data")), childScope(), str)
+      assert(b2.tpe == str)
+    }
+
+    "apply field-value ops through a field-typed self" in {
+      val sc = FnBodyTyper.seedScope(List("self" -> str), Nil)
+      val b = mustType(Nil, BodyExpr.Call(path("self"), "trim", Nil), sc, str)
       assert(b.tpe == str)
     }
 
@@ -464,7 +494,7 @@ final class FnBodyTypingTest extends AnyWordSpec {
       val cond = BodyExpr.BinOp(">", path("self", fld("count")), intLit(0))
       val b = mustType(List(BodyStmt.Assert(cond, None)), path("self", fld("count")), childScope(), i32)
       assert(b.assertions.size == 1)
-      assert(b.assertions.head.capturedVars == List("self"))
+      assert(b.assertions.head.capturedVars.map(showVar) == List("self.count"))
       assert(b.assertions.head.msg.isEmpty)
       assert(b.assertions.head.trace.isEmpty)
       b.stmts.head match {
@@ -484,7 +514,7 @@ final class FnBodyTypingTest extends AnyWordSpec {
         str,
       )
       assert(b.assertions.size == 1)
-      assert(b.assertions.head.capturedVars == List("self"))
+      assert(b.assertions.head.capturedVars.map(showVar) == List("self.data"))
       assert(b.assertions.head.msg.map(_.tpe) == Some(str))
     }
 
@@ -492,7 +522,15 @@ final class FnBodyTypingTest extends AnyWordSpec {
       val sc = childScope("a" -> ScopeEntry.Param(bit), "b" -> ScopeEntry.Param(bit))
       val cond = BodyExpr.BinOp("&&", path("a"), BodyExpr.BinOp("&&", path("b"), path("a")))
       val b = mustType(List(BodyStmt.Assert(cond, None)), intLit(1), sc, i32)
-      assert(b.assertions.head.capturedVars == List("a", "b"))
+      assert(b.assertions.head.capturedVars.map(showVar) == List("a", "b"))
+    }
+
+    "type assert with an indexed path collects the full path and the index vars" in {
+      val sc = childScope("i" -> ScopeEntry.Param(i32))
+      val cond = BodyExpr.BinOp("!=", path("self", fld("tags"), BodyExpr.Segment.Index(path("i"))), strLit(""))
+      val b = mustType(List(BodyStmt.Assert(cond, None)), strLit("x"), sc, str)
+      assert(b.assertions.size == 1)
+      assert(b.assertions.head.capturedVars.map(showVar) == List("i", "self.tags[_]"))
     }
 
     "type assert inside a for body and surface it in TypedBody.assertions" in {
@@ -503,7 +541,7 @@ final class FnBodyTypingTest extends AnyWordSpec {
       )
       val b = mustType(List(eff(loop)), path("self", fld("count")), childScope(), i32)
       assert(b.assertions.size == 1)
-      assert(b.assertions.head.capturedVars == List("k"))
+      assert(b.assertions.head.capturedVars.map(showVar) == List("k"))
     }
 
     "type assert inside match arm blocks" in {
@@ -530,7 +568,7 @@ final class FnBodyTypingTest extends AnyWordSpec {
         case other => fail(s"expected typed match, got $other")
       }
       assert(nested.size == 1)
-      assert(nested.head.capturedVars == List("x"))
+      assert(nested.head.capturedVars.map(showVar) == List("x"))
     }
 
     "loops and valueless blocks carry void" in {

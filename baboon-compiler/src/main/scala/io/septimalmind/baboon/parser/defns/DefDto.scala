@@ -417,10 +417,10 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def callSuffix[$: P]: P[(String, List[BodyExpr])] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    // User-method calls parse as a generic Call; the typer decides whether
+    // `method` is a builtin or a user-defined (computed-fn) method on the
+    // receiver type. Unknown names are NOT rejected here.
     P("." ~/ idt.symbol ~ callArgs).map { case (method, args) =>
-      if (!methodWhitelist.contains(method)) {
-        throw new IllegalArgumentException(s"method '$method' is not allowed in context functions; allowed methods: ${methodWhitelist.mkString(", ")}")
-      }
       (method, args)
     }
   }
@@ -455,12 +455,20 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
     Literals.Literals.Str.map(s => BodyExpr.Lit(BodyLiteral.StrLit(s)))
   }
 
-  private val methodWhitelist: Set[String] = Set(
-    "uppercase", "lowercase", "capitalize", "trim", "split", "join", "concat",
-    "contains", "startsWith", "endsWith", "toString", "length",
-    "abs", "min", "max", "floor", "ceil", "round",
-  )
-
+  /** Field-definition core shared by plain fields and `= fn` properties.
+    *
+    * Container-self clarification (no grammar change here — roles are carried
+    * by the produced member):
+    *   - a trailing `= fn(self: Self) { ... }` parses into the returned `RawFn`
+    *     and becomes an `FnProperty` (role `Computed`): `self: Self` is the
+    *     enclosing container instance (the owner DTO), and capture paths on it
+    *     situate the container subtree (transparent through `opt`/`set`/`map`,
+    *     `opt.Some` implied);
+    *   - `@normalize(fn(self: Self) { ... })` / `@default(fn(self: Self) { ... })`
+    *     keep the fn on the `RawField` (roles `Normalize` / `Default`):
+    *     `self: Self` there is the field's own value (the declared field type).
+    * P2 resolves `Self` per role accordingly.
+    */
   private def fieldDefCore[$: P]: P[(RawField, Option[RawFn])] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
     (defaultAnnotation.? ~ normalizeAnnotation.? ~ migrateAnnotation.? ~ fieldName ~ ":" ~/ typeRef ~ ("=" ~/ fnDecl).? ~ fieldWas.?).map {

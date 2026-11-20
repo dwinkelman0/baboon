@@ -20,7 +20,7 @@
       "workload": "Workload(activity=0.5, memIntensity=0.5)"
     }
   },
-  "model_version": "power.arch1@1.0.0",
+  "model_version": "power.arch1@1.0.1",
   "results_hash": "28ab9c0721c11430c077e9d57c9202281b21b29c48fe35955bb870f860882af6",
   "study": "golden"
 }

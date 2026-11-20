@@ -140,6 +140,10 @@ object FnSensitivityExtractor {
           expr(target, ctx, visiting, leafB, shapeB)
           args.foreach(expr(_, ctx, visiting, leafB, shapeB))
           shapeB ++= shapeOf(target.tpe)
+        case TypedExpr.UserCall(target, _, args, _) =>
+          expr(target, ctx, visiting, leafB, shapeB)
+          args.foreach(expr(_, ctx, visiting, leafB, shapeB))
+          shapeB ++= shapeOf(target.tpe)
         case TypedExpr.BinOp(_, l, r, _) =>
           expr(l, ctx, visiting, leafB, shapeB)
           expr(r, ctx, visiting, leafB, shapeB)
@@ -225,9 +229,10 @@ object FnSensitivityExtractor {
                   extendFrom(base)
               }
           }
-        case Some(ScopeEntry.Param(t)) =>
-          val owner = if (p.root == "self") Some(attachment.owner) else userOwner(t)
-          owner.foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
+        case Some(ScopeEntry.Param(_)) if p.root == "self" =>
+          if (segNames.nonEmpty) extendFrom(SchemaPath(attachment.owner, isPrev = false, Nil))
+        case Some(ScopeEntry.Param(_)) =>
+          () // call-site values (extra fn params): local only, no field leafReads
         case Some(ScopeEntry.LetBinding(_)) if ctx.lets.contains(p.root) && !visiting.contains(p.root) =>
           // A `let` use propagates the let's reads, extended with any further segments.
           val tmpL: LeafB  = mutable.LinkedHashSet.empty
@@ -346,6 +351,7 @@ object FnSensitivityExtractor {
     private def ownerOfRoot(root: String, ctx: Ctx): Option[TypeId.User] =
       ctx.scope.get(root) match {
         case Some(ScopeEntry.Param(_)) if root == "self" => Some(attachment.owner)
+        case Some(ScopeEntry.Param(_))                   => None
         case Some(e)                                    => userOwner(e.tpe)
         case None                                       => None
       }

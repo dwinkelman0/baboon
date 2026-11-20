@@ -67,6 +67,20 @@ final case class RawBody(
 /** Context-function AST node: at most ONE capture (highest scope needed).
   * Zero captures (`fn(...){...}`) is valid; two captures fail at parse time.
   * Previous-version (`!old: T`) capture-prefix syntax is deferred to a later phase.
+  *
+  * Container-self clarification (roles are assigned by the owning member):
+  *   - `= fn` (a read-only `FnProperty`, role `Computed`): `self: Self` is the
+  *     enclosing container instance (the owner DTO), so the body reads sibling
+  *     fields through it (`self.width * self.height`). A capture path on such
+  *     a fn situates the container subtree (e.g. `s: MyStruct.member` binds
+  *     `s` to that member for a computed on the container), transparent through
+  *     `opt`/`set`/`map` with `opt.Some` implied.
+  *   - `@normalize(fn(self: Self) { ... })` / `@default(fn(self: Self) { ... })`:
+  *     `self: Self` is the field's own value (the declared field type), so the
+  *     body applies field-value operations (`self.trim()` on a `str` field).
+  * The typer (P2) resolves `Self` per role and rejects a mismatched explicit
+  * `self` annotation on computed fns (e.g. the field scalar when the owner is
+  * a DTO).
   */
 final case class RawFn(captures: List[RawCapture], params: List[RawFnParam], body: RawBody)
 

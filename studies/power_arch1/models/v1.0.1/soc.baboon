@@ -1,8 +1,19 @@
 // SoC power/performance study schema (studies/power_arch1).
+// v1.0.1: table-owned lookups. The V-f exact-match lookup and the
+// leak/mem lerps moved from SoC into their table DTOs as `= fn`
+// user-defined methods (`self: Self` = the table instance); SoC computed
+// fns delegate via `self.<table>.lookup(...)` / `contains` / `fmaxAt`.
+// Numerics are unchanged from v1.0.0 (same bracket idiom, same asserts;
+// SoC keeps the domain asserts, tables are pure lookups).
+//
+// Container-self (2026-11-19 rule): every `= fn` takes `self: Self` =
+// enclosing container; sibling reads via `self.<field>`; collections
+// transparent, `Some` implied, single capture max. Table methods take one
+// extra call-site param (the lookup key) beyond `self`.
 //
 // One study-agnostic model: hot (per-point) + cold (per-study config) +
 // scalar (quasi-static tuning) inputs are plain required fields on a single
-// root DTO; versioned tables are embedded as lst[Point] instances in-schema
+// root DTO; versioned tables are embedded as table DTO instances in-schema
 // (gaps-and-principles.md: tables in-schema, schemas study-agnostic).
 // All derived quantities are computed fn-properties (no wire); all domain
 // violations are assert-only (never propagated).
@@ -13,7 +24,7 @@
 
 model power.arch1
 
-version "1.0.0"
+version "1.0.1"
 
 // Operating point: hot inputs (per sweep point).
 data OpPoint {
@@ -61,14 +72,81 @@ data VfPoint {
   fmax: f64
 }
 
+// Leakage table: owns the voltage->power lerp over its points.
+data LeakTable {
+  points: lst[LeakPoint]
+
+  lookup: f64 = fn(self: Self, x: f64) {
+    let px: f64 = self.points[0].voltage;
+    let py: f64 = self.points[0].pleak;
+    let qx: f64 = self.points[0].voltage;
+    let qy: f64 = self.points[0].pleak;
+    let hit: bit = false;
+    for (p in self.points) {
+      px = if (p.voltage <= x) { p.voltage } else { px };
+      py = if (p.voltage <= x) { p.pleak } else { py };
+      qx = if (hit == false) { if (p.voltage >= x) { p.voltage } else { qx } } else { qx };
+      qy = if (hit == false) { if (p.voltage >= x) { p.pleak } else { qy } } else { qy };
+      hit = if (hit == false) { p.voltage >= x } else { hit };
+    }
+    let span: f64 = qx - px;
+    let t: f64 = if (span <= 0.0) { 0.0 } else { (x - px) / span };
+    py + t * (qy - py)
+  }
+}
+
+// Memory-efficiency table: owns the intensity->efficiency lerp.
+data MemTable {
+  points: lst[MemPoint]
+
+  lookup: f64 = fn(self: Self, x: f64) {
+    let px: f64 = self.points[0].intensity;
+    let py: f64 = self.points[0].meff;
+    let qx: f64 = self.points[0].intensity;
+    let qy: f64 = self.points[0].meff;
+    let hit: bit = false;
+    for (p in self.points) {
+      px = if (p.intensity <= x) { p.intensity } else { px };
+      py = if (p.intensity <= x) { p.meff } else { py };
+      qx = if (hit == false) { if (p.intensity >= x) { p.intensity } else { qx } } else { qx };
+      qy = if (hit == false) { if (p.intensity >= x) { p.meff } else { qy } } else { qy };
+      hit = if (hit == false) { p.intensity >= x } else { hit };
+    }
+    let span: f64 = qx - px;
+    let t: f64 = if (span <= 0.0) { 0.0 } else { (x - px) / span };
+    py + t * (qy - py)
+  }
+}
+
+// V-f table: owns the exact-match voltage membership + fmax lookup.
+data VfTable {
+  points: lst[VfPoint]
+
+  contains: bit = fn(self: Self, v: f64) {
+    let found: bit = false;
+    for (p in self.points) {
+      found = if (p.voltage == v) { true } else { found };
+    }
+    found
+  }
+
+  fmaxAt: f64 = fn(self: Self, v: f64) {
+    let fmax: f64 = self.points[0].fmax;
+    for (p in self.points) {
+      fmax = if (p.voltage == v) { p.fmax } else { fmax };
+    }
+    fmax
+  }
+}
+
 root data SoC {
   op: OpPoint
   arch: Arch
   workload: Workload
   scalars: Scalars
-  leakTable: lst[LeakPoint]
-  memTable: lst[MemPoint]
-  vfTable: lst[VfPoint]
+  leakTable: LeakTable
+  memTable: MemTable
+  vfTable: VfTable
   opsPerTask: f64
   bytesPerTask: f64
   bwPeak: f64
@@ -94,51 +172,19 @@ root data SoC {
     self.ceff * vf * self.workload.activity
   }
 
-  // 3. Leakage power: leak_table(V) lerped over voltage, scaled by leakMult.
-  // Explicit for-in lerp: bracket x between the last row with
-  // voltage <= x (px,py) and the first row with voltage >= x (qx,qy).
+  // 3. Leakage power: table-owned lerp over voltage, scaled by leakMult.
   pleak: f64 = fn(self: Self) {
     assert(0.0 < self.scalars.leakMult, "leakMult must be positive");
     assert(self.scalars.leakMult <= 1.0, "leakMult derate must be within (0, 1]");
-    let x: f64 = self.op.voltage;
-    let px: f64 = self.leakTable[0].voltage;
-    let py: f64 = self.leakTable[0].pleak;
-    let qx: f64 = self.leakTable[0].voltage;
-    let qy: f64 = self.leakTable[0].pleak;
-    let hit: bit = false;
-    for (p in self.leakTable) {
-      px = if (p.voltage <= x) { p.voltage } else { px };
-      py = if (p.voltage <= x) { p.pleak } else { py };
-      qx = if (hit == false) { if (p.voltage >= x) { p.voltage } else { qx } } else { qx };
-      qy = if (hit == false) { if (p.voltage >= x) { p.pleak } else { qy } } else { qy };
-      hit = if (hit == false) { p.voltage >= x } else { hit };
-    }
-    let span: f64 = qx - px;
-    let t: f64 = if (span <= 0.0) { 0.0 } else { (x - px) / span };
-    let base: f64 = py + t * (qy - py);
+    let base: f64 = self.leakTable.lookup(self.op.voltage);
     base * self.scalars.leakMult
   }
 
-  // 4. Memory efficiency: mem_table(intensity) lerped. Same bracket idiom.
+  // 4. Memory efficiency: table-owned lerp over intensity.
   meff: f64 = fn(self: Self) {
     assert(0.0 <= self.workload.memIntensity, "memIntensity must be non-negative");
     assert(self.workload.memIntensity <= 1.0, "memIntensity must be within [0, 1]");
-    let x: f64 = self.workload.memIntensity;
-    let px: f64 = self.memTable[0].intensity;
-    let py: f64 = self.memTable[0].meff;
-    let qx: f64 = self.memTable[0].intensity;
-    let qy: f64 = self.memTable[0].meff;
-    let hit: bit = false;
-    for (p in self.memTable) {
-      px = if (p.intensity <= x) { p.intensity } else { px };
-      py = if (p.intensity <= x) { p.meff } else { py };
-      qx = if (hit == false) { if (p.intensity >= x) { p.intensity } else { qx } } else { qx };
-      qy = if (hit == false) { if (p.intensity >= x) { p.meff } else { qy } } else { qy };
-      hit = if (hit == false) { p.intensity >= x } else { hit };
-    }
-    let span: f64 = qx - px;
-    let t: f64 = if (span <= 0.0) { 0.0 } else { (x - px) / span };
-    py + t * (qy - py)
+    self.memTable.lookup(self.workload.memIntensity)
   }
 
   // 5. Compute time per task.
@@ -168,13 +214,8 @@ root data SoC {
     assert(self.op.temp <= self.tmax, "temp exceeds tmax");
     let v: f64 = self.op.voltage;
     let f: f64 = self.op.freq;
-    let fmax: f64 = self.vfTable[0].fmax;
-    let found: bit = false;
-    for (p in self.vfTable) {
-      found = if (p.voltage == v) { true } else { found };
-      fmax = if (p.voltage == v) { p.fmax } else { fmax };
-    }
-    assert(found, "voltage not in V-f table");
+    assert(self.vfTable.contains(v), "voltage not in V-f table");
+    let fmax: f64 = self.vfTable.fmaxAt(v);
     assert(f <= fmax, "freq exceeds fmax for voltage");
     let tot: f64 = self.pdyn + self.pleak;
     assert(0.0 <= tot, "ptotal must be non-negative");
