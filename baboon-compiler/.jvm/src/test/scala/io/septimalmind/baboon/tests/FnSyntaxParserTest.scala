@@ -143,6 +143,22 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       ))
     }
 
+    "parse a computed fn whose capture situates the container" in {
+      // `= fn` (FnProperty/computed) captures situate the enclosing container:
+      // `s: MyStruct.member` binds `s` to that member (transparent through
+      // opt/set, `.Some` implied), while `self: Self` is the container
+      // instance itself — contrast `@normalize` / `@default(fn)`, where
+      // `self` is the field's own value. Parser-level only: roles resolve in P2.
+      val p = onlyProperty("data D { area: f32 = fn[s: MyStruct.member](self: Self) { self.width } }")
+      val fn = unwrapFn(p.field.default)
+      assert(fn.captures.size == 1)
+      assert(fn.captures.head.name == "s")
+      assertSimpleType(fn.captures.head.rootType, "MyStruct")
+      assert(fn.captures.head.path == List(RawCaptureStep.Single(RawLocatorSeg.Field("member"))))
+      assert(fn.params.map(_.name) == List("self"))
+      assertSimpleType(fn.params.head.tpe, "Self")
+    }
+
     "parse a body with let bindings and method call" in {
       val f = onlyField("data D { @default(fn[self: Self]() { let a = self.x; let b = a.uppercase(); b }) x: str }")
       val fn = unwrapFn(f.field.default)
@@ -269,6 +285,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       assert(fn.body.result == BodyExpr.Path("self", List(BodyExpr.Segment.Field("width"))))
     }
 
+    "parse computed fn with external args" in {
+      val p = onlyProperty("data D { curve: f32 = fn(self: Self, t: f32) { self.base + t } }")
+      val fn = unwrapFn(p.field.default)
+      assert(fn.params.size == 2)
+      assert(fn.params.map(_.name) == List("self", "t"))
+      assertSimpleType(fn.params(1).tpe, "f32")
+    }
+
     "reject unclosed fn" in {
       expectParseFailure("data D { @default(fn[a: A](x: X { x }) y: str }")
     }
@@ -277,11 +301,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       expectParseFailure("data D { @default(fn[s: T($c* :)]() { s }) x: str }")
     }
 
-    "reject non-whitelisted method call" in {
-      val err = intercept[IllegalArgumentException] {
-        parseDto("data D { @default(fn[s: S]() { s.foo() }) x: str }")
-      }
-      assert(err.getMessage.contains("foo"), s"unexpected message: ${err.getMessage}")
+    "parse a non-whitelisted method call (rejection moved to the typer)" in {
+      // DefDto.callSuffix no longer guards method names: user-defined
+      // (computed-fn) methods like `self.table.lookup()` must parse. Unknown
+      // methods are rejected later by FnBodyTyper ("unknown method: ..."),
+      // covered by FnBodyTypingTest "reject an unknown method".
+      val f = onlyField("data D { @default(fn[s: S]() { s.foo() }) x: str }")
+      val fn = unwrapFn(f.field.default)
+      assert(fn.body.result == BodyExpr.Call(BodyExpr.Path("s", Nil), "foo", Nil))
     }
 
     "reject empty fn body" in {
@@ -663,12 +690,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       expectParseFailure("data D { @default(fn[s: T($c* :)]() { s }) x: str }")
     }
 
-    "reject every non-whitelisted method with its name in the message" in {
+    "parse every method name verbatim (whitelist enforcement moved to the typer)" in {
       List("foo", "bar", "doFoo", "compute", "frobnicate").foreach { m =>
-        val err = intercept[IllegalArgumentException] {
-          parseDto(s"data D { @default(fn[s: S]() { s.$m() }) x: str }")
-        }
-        assert(err.getMessage.contains(m), s"message [${err.getMessage}] should mention $m")
+        val f = onlyField(s"data D { @default(fn[s: S]() { s.$m() }) x: str }")
+        val fn = unwrapFn(f.field.default)
+        assert(
+          fn.body.result == BodyExpr.Call(BodyExpr.Path("s", Nil), m, Nil),
+          s"method name $m not preserved by the parser",
+        )
       }
     }
 

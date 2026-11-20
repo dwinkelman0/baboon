@@ -1,6 +1,6 @@
 package io.septimalmind.baboon.typer
 
-import io.septimalmind.baboon.parser.model.{RawFn, RawTypeRef}
+import io.septimalmind.baboon.parser.model.{RawFn, RawTypeName, RawTypeRef}
 import io.septimalmind.baboon.typer.FnSensitivityExtractor.Slot
 import io.septimalmind.baboon.typer.model._
 
@@ -38,6 +38,7 @@ object FnPipeline {
     capture: Option[TypedCapture],
     body: TypedBody,
     expected: TypeRef,
+    params: List[(String, TypeRef)] = Nil
   )
 
   /** Backend-ready program: one IR node + sensitivity per site, the P5 gated
@@ -95,6 +96,52 @@ object FnPipeline {
     bindings: List[(String, ScopeEntry)],
   )
 
+  /** Role-dependent `Self` (container-self clarification).
+    *
+    * `Self` in a capture root or param type means:
+    *   - `Computed` / `Migrate`: the enclosing container instance (owner DTO);
+    *   - `Default` / `Normalize`: the field's own value (the expected type).
+    * Rewritten here (P2) so the standalone pipeline and the translator share
+    * one home for `Self`; the translator must not pre-rewrite. A capture path
+    * on `= fn` (computed) therefore situates the container subtree, while a
+    * normalize/default `self: Self` types as the field value.
+    */
+  private def selfFor(role: FnRole, owner: String, expected: RawTypeRef, raw: RawTypeRef): RawTypeRef = raw match {
+    case RawTypeRef.Simple(n, pre) if n.name == "Self" =>
+      role match {
+        case FnRole.Computed | FnRole.Migrate   => RawTypeRef.Simple(RawTypeName(owner), pre)
+        case FnRole.Default | FnRole.Normalize => expected
+      }
+    case other => other
+  }
+
+  /** A `Computed` (`= fn`) `self` must be the enclosing container: an explicit
+    * annotation naming anything else (e.g. the field scalar when the owner is
+    * a DTO) is a resolution error. Other roles leave explicit annotations
+    * unchecked. An unknown owner is skipped here (P4 reports it).
+    */
+  private def checkComputedSelf(
+    site: FnSite,
+    in: FnSiteInputs,
+    schema: FnSchema,
+    params: List[(String, TypeRef)],
+  ): FnTypes.Res[Unit] =
+    in.role match {
+      case FnRole.Computed =>
+        params.find(_._1 == "self") match {
+          case None => FnTypes.ok(())
+          case Some((_, t)) =>
+            schema.lookup(in.owner) match {
+              case Some(u: Typedef.User) =>
+                val ownerT = TypeRef.Scalar(u.id)
+                if (t == ownerT) FnTypes.ok(())
+                else FnTypes.fail(s"${tag(site)}: computed `self` must be the enclosing container `${u.id.name.name}`, got $t")
+              case _ => FnTypes.ok(())
+            }
+        }
+      case _ => FnTypes.ok(())
+    }
+
   private def pass2(p1: List[P1]): Either[List[String], List[P2]] = {
     val errs = List.newBuilder[String]
     val out = p1.flatMap { case P1(site, in) =>
@@ -105,14 +152,14 @@ object FnPipeline {
         .map(_.map(m => s"${tag(site)}: expected type: $m"))
       val paramsR = FnTypes
         .traverse(in.rawFn.params.map { p =>
-          FnTypes.resolveRaw(p.tpe, schema).left.map(_.map(m => s"${tag(site)}: param `${p.name}`: $m")).map(t => p.name -> t)
+          FnTypes.resolveRaw(selfFor(in.role, in.owner, in.expected, p.tpe), schema).left.map(_.map(m => s"${tag(site)}: param `${p.name}`: $m")).map(t => p.name -> t)
         })
       val capR: FnTypes.Res[(Option[TypedCapture], List[(String, ScopeEntry)])] =
         in.rawFn.captures match {
           case Nil => FnTypes.ok((None, Nil))
           case cap :: Nil =>
             FnCaptureResolver
-              .resolveCapture(cap, schema)
+              .resolveCapture(cap.copy(rootType = selfFor(in.role, in.owner, in.expected, cap.rootType)), schema)
               .left
               .map(_.map(m => s"${tag(site)}: $m"))
               .map { case (c, b) => (Some(c), b) }
@@ -121,7 +168,12 @@ object FnPipeline {
         }
       (expR, paramsR, capR) match {
         case (Right(exp), Right(params), Right((cap, bindings))) =>
-          Some(P2(site, in, exp, params, cap, bindings))
+          checkComputedSelf(site, in, schema, params) match {
+            case Right(_) => Some(P2(site, in, exp, params, cap, bindings))
+            case Left(es) =>
+              es.foreach(errs += _)
+              None
+          }
         case _ =>
           expR.left.toOption.foreach(es => es.foreach(errs += _))
           paramsR.left.toOption.foreach(es => es.foreach(errs += _))
@@ -142,7 +194,7 @@ object FnPipeline {
     val out = p2s.flatMap { p2 =>
       val scope = FnBodyTyper.seedScope(p2.params, p2.bindings)
       FnBodyTyper.typeBody(p2.in.rawFn.body, scope, p2.in.schema, p2.expected) match {
-        case Right(body) => Some(P3(p2, TypedFn(p2.site, p2.capture, body, p2.expected), scope))
+        case Right(body) => Some(P3(p2, TypedFn(p2.site, p2.capture, body, p2.expected, p2.params), scope))
         case Left(es) =>
           es.foreach(e => errs += s"${tag(p2.site)}: $e")
           None
@@ -175,7 +227,70 @@ object FnPipeline {
       }
     }
     val e = errs.result().distinct
-    if (e.nonEmpty) Left(e) else Right(out)
+    if (e.nonEmpty) Left(e) else Right(unionCalleeReads(out))
+  }
+
+  /** P4 callee union: a caller that issues `recv.method(args)` also reads
+    * whatever the callee method body reads. Without this the caller's
+    * sensitivity would cover only the receiver shape, and the read gate /
+    * dep graph would miss table-field ordering edges.
+    */
+  private def unionCalleeReads(p4s: List[P4]): List[P4] = {
+    if (p4s.isEmpty) return p4s
+    val bySite: Map[(String, String), P4] =
+      p4s.map(p => (p.p3.p2.in.owner, p.p3.p2.in.field) -> p).toMap
+    def calleeSites(body: TypedBody): List[(String, String)] = {
+      val out = List.newBuilder[(String, String)]
+      def expr(e: TypedExpr): Unit = e match {
+        case TypedExpr.UserCall(t, m, as, _) =>
+          t.tpe match {
+            case TypeRef.Scalar(id: TypeId.User) => out += ((id.name.name, m))
+            case _                               => ()
+          }
+          expr(t); as.foreach(expr)
+        case TypedExpr.Call(t, _, as, _)  => expr(t); as.foreach(expr)
+        case TypedExpr.BinOp(_, l, r, _)  => expr(l); expr(r)
+        case TypedExpr.UnaryOp(_, x, _)   => expr(x)
+        case TypedExpr.If(c, t, el, _)    => expr(c); expr(t); expr(el)
+        case TypedExpr.Assign(t, v, _)    => expr(t); expr(v)
+        case TypedExpr.ForIn(_, it, b, _) => expr(it); block(b)
+        case TypedExpr.ForC(i, c, s, b, _) => expr(i.value); expr(c); expr(s); block(b)
+        case TypedExpr.Match(s, arms, _)  => expr(s); arms.foreach(a => block(a.body))
+        case TypedExpr.Block(sts, v, _)   => sts.foreach(stmt); v.foreach(expr)
+        case TypedExpr.Lit(_, _)          => ()
+        case TypedExpr.Path(_, segs, _)   => segs.foreach {
+          case TypedPathSeg.Index(i, _) => expr(i)
+          case _                        => ()
+        }
+      }
+      def block(b: TypedExpr.Block): Unit = { b.stmts.foreach(stmt); b.value.foreach(expr) }
+      def stmt(s: TypedStmt): Unit = s match {
+        case TypedStmt.Let(_, _, v) => expr(v)
+        case TypedStmt.Effect(e)    => expr(e)
+        case TypedStmt.Assert(a)    => expr(a.cond); a.msg.foreach(expr)
+      }
+      body.stmts.foreach(stmt); expr(body.result)
+      out.result()
+    }
+    // Fixpoint: callees may themselves call further methods.
+    var reads: Map[(String, String), Sensitivity] =
+      p4s.map(p => (p.p3.p2.in.owner, p.p3.p2.in.field) -> p.read).toMap
+    var changed = true
+    while (changed) {
+      changed = false
+      p4s.foreach { p =>
+        val key = (p.p3.p2.in.owner, p.p3.p2.in.field)
+        calleeSites(p.p3.typed.body).foreach { ck =>
+          bySite.get(ck).foreach { _ =>
+            val add = reads.getOrElse(ck, Sensitivity(Set.empty, Set.empty, Set.empty))
+            val cur = reads.getOrElse(key, Sensitivity(Set.empty, Set.empty, Set.empty))
+            val merged = Sensitivity(cur.leafReads ++ add.leafReads, cur.shapeReads ++ add.shapeReads, cur.prevReads ++ add.prevReads)
+            if (merged != cur) { reads = reads.updated(key, merged); changed = true }
+          }
+        }
+      }
+    }
+    p4s.map(p => p.copy(read = reads.getOrElse((p.p3.p2.in.owner, p.p3.p2.in.field), p.read)))
   }
 
   // -- P5: read gate -------------------------------------------------------------------
@@ -303,6 +418,7 @@ object FnPipeline {
           case TypedPathSeg.Index(i, t) => out += t; expr(i)
         }
         case TypedExpr.Call(t, _, as, _)  => expr(t); as.foreach(expr)
+        case TypedExpr.UserCall(t, _, as, _) => expr(t); as.foreach(expr)
         case TypedExpr.BinOp(_, l, r, _)  => expr(l); expr(r)
         case TypedExpr.UnaryOp(_, x, _)   => expr(x)
         case TypedExpr.If(c, t, el, _)    => expr(c); expr(t); expr(el)

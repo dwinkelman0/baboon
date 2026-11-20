@@ -499,10 +499,21 @@ object BaboonTyper {
         renames  <- computeRenames(pkg, flattened)
         ordered  <- order(pkg, flattened, meta)
 
+        // Order-independent fn assembly: hard-dep toposort is arbitrary for types
+        // related only through field refs or fn bodies, so a DTO translated early
+        // would otherwise fail to resolve not-yet-translated siblings ("unknown
+        // type"/"no fields on"). Pre-compute shells (real field types +
+        // signature-only fn placeholders) for the whole domain and merge them
+        // under each step's accumulated translations (`shells ++ acc`, so full
+        // translations always win). Shells only feed fn pipeline resolution;
+        // they never reach `out`, backends, or diagnostics.
+        shells   <- F.flatTraverseAccumErrors(ordered)(d => translator(pkg, d, Map.empty[TypeId, DomainMember]).shellMember())
+        shellMap: Map[TypeId, DomainMember] = shells.map(m => (m.id: TypeId, m: DomainMember)).toMap
+
         out <- F.foldLeft(ordered)(Map.empty[TypeId, DomainMember]) {
           case (acc, defn) =>
             for {
-              next  <- translator(pkg, defn, acc).translate()
+              next  <- translator(pkg, defn, shellMap ++ acc).translate()
               mapped = next.map(m => (m.id, m))
               dupes  = acc.keySet.intersect(mapped.map(_._1).toSet)
               _ <- F.when(dupes.nonEmpty)(

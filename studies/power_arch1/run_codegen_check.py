@@ -16,11 +16,14 @@ import power_model as pm
 
 from pygen.power.arch1.Arch import Arch
 from pygen.power.arch1.LeakPoint import LeakPoint
+from pygen.power.arch1.LeakTable import LeakTable
 from pygen.power.arch1.MemPoint import MemPoint
+from pygen.power.arch1.MemTable import MemTable
 from pygen.power.arch1.OpPoint import OpPoint
 from pygen.power.arch1.Scalars import Scalars
 from pygen.power.arch1.SoC import SoC
 from pygen.power.arch1.VfPoint import VfPoint
+from pygen.power.arch1.VfTable import VfTable
 from pygen.power.arch1.Workload import Workload
 
 
@@ -31,9 +34,9 @@ def gen_soc(inp):
         workload=Workload(activity=inp["workload"].activity, memIntensity=inp["workload"].memIntensity),
         scalars=Scalars(ceffMult=inp["scalars"].ceffMult, leakMult=inp["scalars"].leakMult,
                         perfAdj=inp["scalars"].perfAdj),
-        leakTable=[LeakPoint(voltage=p.voltage, pleak=p.pleak) for p in inp["leak_table"]],
-        memTable=[MemPoint(intensity=p.intensity, meff=p.meff) for p in inp["mem_table"]],
-        vfTable=[VfPoint(voltage=p.voltage, fmax=p.fmax) for p in inp["vf_table"]],
+        leakTable=LeakTable(points=[LeakPoint(voltage=p.voltage, pleak=p.pleak) for p in inp["leak_table"].points]),
+        memTable=MemTable(points=[MemPoint(intensity=p.intensity, meff=p.meff) for p in inp["mem_table"].points]),
+        vfTable=VfTable(points=[VfPoint(voltage=p.voltage, fmax=p.fmax) for p in inp["vf_table"].points]),
         opsPerTask=inp["ops_per_task"],
         bytesPerTask=inp["bytes_per_task"],
         bwPeak=inp["bw_peak"],

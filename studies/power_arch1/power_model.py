@@ -1,4 +1,7 @@
-"""Hand-lowered mirror of studies/power_arch1/soc.baboon (model power.arch1 v1.0.0).
+"""Hand-lowered mirror of studies/power_arch1/models/latest/soc.baboon (model power.arch1 v1.0.1).
+
+Table lookups are table-owned methods (LeakTable.lookup, MemTable.lookup,
+VfTable.contains/fmaxAt); SoC delegates to them. Numerics unchanged from v1.0.0.
 
 Faithful manual lowering of every computed fn-property, used two ways:
   1. Differential oracle: cross-checked against baboon `:python` codegen
@@ -60,6 +63,41 @@ class VfPoint:
     fmax: float
 
 
+@dataclass(frozen=True)
+class LeakTable:
+    points: tuple = ()
+
+    def lookup(self, x):
+        xs = [p.voltage for p in self.points]
+        ys = [p.pleak for p in self.points]
+        return _lerp(xs, ys, x)
+
+
+@dataclass(frozen=True)
+class MemTable:
+    points: tuple = ()
+
+    def lookup(self, x):
+        xs = [p.intensity for p in self.points]
+        ys = [p.meff for p in self.points]
+        return _lerp(xs, ys, x)
+
+
+@dataclass(frozen=True)
+class VfTable:
+    points: tuple = ()
+
+    def contains(self, v):
+        return any(p.voltage == v for p in self.points)
+
+    def fmax_at(self, v):
+        fmax = self.points[0].fmax
+        for p in self.points:
+            if p.voltage == v:
+                fmax = p.fmax
+        return fmax
+
+
 def _lerp(table_x, table_y, x):
     """Explicit for-loop lerp (mirrors the fn bracket idiom in soc.baboon)."""
     px, py = table_x[0], table_y[0]
@@ -82,9 +120,9 @@ class SoC:
     arch: Arch
     workload: Workload
     scalars: Scalars = field(default_factory=Scalars)
-    leak_table: tuple = ()
-    mem_table: tuple = ()
-    vf_table: tuple = ()
+    leak_table: LeakTable = field(default_factory=LeakTable)
+    mem_table: MemTable = field(default_factory=MemTable)
+    vf_table: VfTable = field(default_factory=VfTable)
     ops_per_task: float = 1.0e9
     bytes_per_task: float = 4.0e9
     bw_peak: float = 50.0e9
@@ -110,23 +148,19 @@ class SoC:
         vf = v2 * self.op.freq
         return self.ceff * vf * self.workload.activity
 
-    # 3. Pleak = leak_table(V) x leakMult
+    # 3. Pleak = leak_table(V) x leakMult (table-owned lerp)
     @property
     def pleak(self):
         assert 0.0 < self.scalars.leakMult, "leakMult must be positive"
         assert self.scalars.leakMult <= 1.0, "leakMult derate must be within (0, 1]"
-        xs = [p.voltage for p in self.leak_table]
-        ys = [p.pleak for p in self.leak_table]
-        return _lerp(xs, ys, self.op.voltage) * self.scalars.leakMult
+        return self.leak_table.lookup(self.op.voltage) * self.scalars.leakMult
 
-    # 4. Meff = meff_table(mem_intensity)
+    # 4. Meff = meff_table(mem_intensity) (table-owned lerp)
     @property
     def meff(self):
         assert 0.0 <= self.workload.memIntensity, "memIntensity must be non-negative"
         assert self.workload.memIntensity <= 1.0, "memIntensity must be within [0, 1]"
-        xs = [p.intensity for p in self.mem_table]
-        ys = [p.meff for p in self.mem_table]
-        return _lerp(xs, ys, self.workload.memIntensity)
+        return self.mem_table.lookup(self.workload.memIntensity)
 
     # 5. Tcomp
     @property
@@ -150,19 +184,13 @@ class SoC:
         assert 0.0 < self.tmem, "tmem must be positive"
         return min(self.tcomp, self.tmem)
 
-    # 8. Ptotal + envelope asserts
+    # 8. Ptotal + envelope asserts (table-owned V-f lookup)
     @property
     def ptotal(self):
         assert self.op.temp <= self.tmax, "temp exceeds tmax"
         v, f = self.op.voltage, self.op.freq
-        fmax = self.vf_table[0].fmax
-        found = False
-        for p in self.vf_table:
-            if p.voltage == v:
-                found = True
-            if p.voltage == v:
-                fmax = p.fmax
-        assert found, "voltage not in V-f table"
+        assert self.vf_table.contains(v), "voltage not in V-f table"
+        fmax = self.vf_table.fmax_at(v)
         assert f <= fmax, "freq exceeds fmax for voltage"
         tot = self.pdyn + self.pleak
         assert 0.0 <= tot, "ptotal must be non-negative"
@@ -199,7 +227,7 @@ class SoC:
         }
 
 
-MODEL_VERSION = "power.arch1@1.0.0"
+MODEL_VERSION = "power.arch1@1.0.1"
 DATA_VERSIONS = {"vf": "vf-v1", "leak": "leak-nominal-v1", "meff": "meff-v1"}
 
 VF_TABLE = (
@@ -230,9 +258,9 @@ def golden_inputs():
         arch=Arch(cores=4.0, cacheMB=8.0, memCfg="ddr5-1ch"),
         workload=Workload(activity=0.5, memIntensity=0.5),
         scalars=Scalars(ceffMult=1.0, leakMult=1.0, perfAdj=1.0),
-        leak_table=LEAK_TABLE,
-        mem_table=MEM_TABLE,
-        vf_table=VF_TABLE,
+        leak_table=LeakTable(points=LEAK_TABLE),
+        mem_table=MemTable(points=MEM_TABLE),
+        vf_table=VfTable(points=VF_TABLE),
         ops_per_task=1.0e9,
         bytes_per_task=4.0e9,
         bw_peak=50.0e9,

@@ -111,16 +111,20 @@ object FnBodyTyper {
       }
   }
 
-  /** Distinct `Path` roots involved in an assert condition, in
-    * first-occurrence order, for backend trace metadata. Walks the *typed*
-    * condition so only successfully-resolved roots are recorded.
+  /** Distinct `Path`s involved in an assert condition, in first-occurrence
+    * order, for backend trace metadata. Walks the *typed* condition so only
+    * successfully-resolved paths are recorded. Full paths are kept (not just
+    * roots) so backends can report e.g. `self.opsPerTask: -1` instead of
+    * dumping the whole root object; index expressions are recursed into so
+    * paths used as indices (e.g. `i` in `element[i]`) are recorded too.
     */
-  def collectAssertVars(cond: TypedExpr): List[String] = {
-    def go(e: TypedExpr, acc: List[String]): List[String] = e match {
-      case TypedExpr.Path(root, segs, _) =>
+  def collectAssertVars(cond: TypedExpr): List[TypedExpr.Path] = {
+    def go(e: TypedExpr, acc: List[TypedExpr.Path]): List[TypedExpr.Path] = e match {
+      case p @ TypedExpr.Path(_, segs, _) =>
         val fromSegs = segs.collect { case TypedPathSeg.Index(idx, _) => idx }.foldLeft(acc)((a, idx) => go(idx, a))
-        if (fromSegs.contains(root)) fromSegs else fromSegs :+ root
+        if (fromSegs.contains(p)) fromSegs else fromSegs :+ p
       case TypedExpr.Call(t, _, args, _)  => args.foldLeft(go(t, acc))((a, x) => go(x, a))
+      case TypedExpr.UserCall(t, _, args, _) => args.foldLeft(go(t, acc))((a, x) => go(x, a))
       case TypedExpr.BinOp(_, l, r, _)    => go(r, go(l, acc))
       case TypedExpr.UnaryOp(_, x, _)     => go(x, acc)
       case TypedExpr.If(c, t, e, _)       => go(e, go(t, go(c, acc)))
@@ -141,7 +145,7 @@ object FnBodyTyper {
         v.foldLeft(a2)((a, x) => go(x, a))
       case TypedExpr.Lit(_, _) => acc
     }
-    def goBlock(b: TypedExpr.Block, acc: List[String]): List[String] = go(b, acc)
+    def goBlock(b: TypedExpr.Block, acc: List[TypedExpr.Path]): List[TypedExpr.Path] = go(b, acc)
     go(cond, Nil)
   }
 
@@ -158,6 +162,7 @@ object FnBodyTyper {
       case TypedExpr.BinOp(_, l, r, _)    => fromExpr(l) ++ fromExpr(r)
       case TypedExpr.UnaryOp(_, x, _)     => fromExpr(x)
       case TypedExpr.Call(t, _, args, _)  => fromExpr(t) ++ args.flatMap(fromExpr)
+      case TypedExpr.UserCall(t, _, args, _) => fromExpr(t) ++ args.flatMap(fromExpr)
       case TypedExpr.Assign(t, v, _)      => fromExpr(t) ++ fromExpr(v)
       case _                              => Nil
     }
@@ -191,9 +196,15 @@ object FnBodyTyper {
       for {
         t   <- typeExpr(target, scope, schema)
         as  <- traverse(args.map(typeExpr(_, scope, schema)))
-        sig <- methodSig(method).toRight(List(s"unknown method: $method"))
-        out <- checkCall(t, sig, method, as)
-      } yield TypedExpr.Call(t, method, as, out)
+        // User-defined methods shadow builtins on user DTOs (e.g. a table-owned
+        // `contains` must win over the builtin str `contains` on VfTable).
+        out <- if (hasUserMethod(t.tpe, method, schema)) {
+          checkUserCall(t, method, as, schema).map(out => (TypedExpr.UserCall(t, method, as, out): TypedExpr))
+        } else methodSig(method) match {
+          case Some(sig) => checkCall(t, sig, method, as).map(out => (TypedExpr.Call(t, method, as, out): TypedExpr))
+          case None      => checkUserCall(t, method, as, schema).map(out => (TypedExpr.UserCall(t, method, as, out): TypedExpr))
+        }
+      } yield out
 
     case BodyExpr.BinOp(op, l, r) =>
       for {
@@ -418,6 +429,54 @@ object FnBodyTyper {
         else if (!conformsLit(args.head, target.tpe)) fail(s"method `$method` arg must conform to ${target.tpe}, got ${args.head.tpe}")
         else ok(target.tpe)
     }
+  }
+
+  /** True when `tpe` is a user DTO carrying a computed `= fn` field
+    * named `method` (lowered as a host method). Used to let user-defined
+    * methods shadow same-named builtins on user receivers.
+    */
+  private def hasUserMethod(tpe: TypeRef, method: String, schema: FnSchema): Boolean = tpe match {
+    case TypeRef.Scalar(id: TypeId.User) =>
+      schema.lookup(id.name.name) match {
+        case Some(d: Typedef.Dto) => d.fields.exists(f => f.name.name == method && f.computed.isDefined)
+        case _                    => false
+      }
+    case _ => false
+  }
+
+  /** User-defined method call: `receiver` must be a user DTO whose field
+    * `method` carries a computed `= fn` (lowered as a Python method when it
+    * takes extra params beyond `self`). Arity is checked against the
+    * non-`self` formals; each call-site arg must conform to its formal.
+    */
+  private def checkUserCall(
+    target: TypedExpr,
+    method: String,
+    args: List[TypedExpr],
+    schema: FnSchema,
+  ): Res[TypeRef] = target.tpe match {
+    case TypeRef.Scalar(id: TypeId.User) =>
+      schema.lookup(id.name.name) match {
+        case Some(d: Typedef.Dto) =>
+          d.fields.find(_.name.name == method) match {
+            case None => fail(s"unknown method: $method (no builtin, no field `$method` on ${id.name.name})")
+            case Some(f) => f.computed match {
+              case None => fail(s"field `$method` on ${id.name.name} is not a method (no `= fn`)")
+              case Some(fn) =>
+                val formals = fn.params.filterNot(_._1 == "self")
+                if (formals.size != args.size)
+                  fail(s"method `$method` takes ${formals.size} args, got ${args.size}")
+                else
+                  formals.zip(args).collectFirst {
+                    case ((n, t), a) if !conformsLit(a, t) => s"method `$method` arg `$n` must conform to $t, got ${a.tpe}"
+                  }.map(fail[TypeRef]).getOrElse(ok(fn.expected))
+            }
+          }
+        case Some(_) => fail(s"unknown method: $method (type ${id.name.name} has no methods)")
+        case None    => fail(s"unknown method: $method (unknown receiver type ${id.name.name})")
+      }
+    case other =>
+      fail(s"unknown method: $method (no builtin, receiver $other has no methods)")
   }
 
   // -- operators ---------------------------------------------------------------

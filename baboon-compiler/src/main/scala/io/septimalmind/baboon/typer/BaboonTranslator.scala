@@ -53,6 +53,135 @@ class BaboonTranslator[F[+_, +_]: Error2](
     }
   }
 
+  /** Order-independent shell for fn assembly.
+    *
+    * The driver translates DTOs in hard-dep toposort order, which is arbitrary
+    * for types related only through field refs or fn bodies (e.g. a table DTO
+    * translated before its point DTO). `fnSchemaFor` reads the translator's
+    * `defined` map, so without shells any fn mentioning a not-yet-translated
+    * sibling type fails with a spurious "unknown type"/"no fields on" error.
+    *
+    * A shell carries real (name, converted type) field pairs plus
+    * signature-only `computed`/`normalize`/`migrate`/`default-Fn` placeholders
+    * (real params + expected type, dummy body). Shells are used ONLY for fn
+    * pipeline resolution (`dtoFields`, user-method signatures); they are
+    * always overwritten by the full translation before `out` is built, and
+    * shell bodies are never lowered. The driver pre-computes shells for the
+    * whole domain and merges them under the accumulated translations
+    * (`shells ++ acc`, so full translations win).
+    *
+    * Covers DTO/Identifier/Contract (field paths + user methods) and Enum
+    * (presence for type positions). ADTs/services/namespaces/aliases are
+    * skipped: ADT members are hard-dep ordered already, services have no
+    * fn-callable fields.
+    */
+  def shellMember(): F[NEList[BaboonIssue], List[DomainMember.User]] = {
+    val rawDefn = defn.defn
+    for {
+      id <- scopeSupport.resolveUserTypeId(rawDefn.defn.name, defn, pkg, rawDefn.defn.meta)
+      out <- rawDefn.defn match {
+        case d: RawDto =>
+          shellDto(id, rawDefn.gcRoot, d, d.derived, d.meta) { case (i, fs, refs) => Typedef.Dto(i, fs, refs) }
+        case d: RawIdentifier =>
+          shellDto(id, rawDefn.gcRoot, d, d.derived, d.meta) { case (i, fs, refs) => Typedef.Dto(i, fs, refs, isIdentifier = true) }
+        case d: RawContract =>
+          shellDto(id, rawDefn.gcRoot, d, Set.empty[RawMemberMeta], d.meta) { case (i, fs, refs) => Typedef.Contract(i, fs, refs) }
+        case e: RawEnum =>
+          converEnum(id, rawDefn.gcRoot, e).map(e => List(e))
+        case _ =>
+          F.pure(List.empty)
+      }
+    } yield out
+  }
+
+  private def shellDto(
+    id: TypeId.User,
+    isRoot: Boolean,
+    dto: RawDtoid,
+    derived: Set[RawMemberMeta],
+    meta: RawNodeMeta,
+  )(
+    produce: (TypeId.User, List[Field], List[TypeId.User]) => Typedef.User
+  ): F[NEList[BaboonIssue], List[DomainMember.User]] = {
+    F.traverseAccumErrors(dto.members.collect {
+      case f: RawDtoMember.FieldDef            => (f.field, f.meta, Option.empty[RawDtoMember.FnProperty])
+      case p: RawDtoMember.FnProperty          => (p.field, p.meta, Some(p))
+      case f: RawDtoMember.TemplateArmFieldDef => (f.field, f.meta, Option.empty[RawDtoMember.FnProperty])
+    }.toList) { case (rawField, m, prop) =>
+      for {
+        tpe <- convertTpe(rawField.tpe, m)
+        fdefault <- rawField.default match {
+          case Some(RawDefaultValue.Fn(fn)) => shellPlaceholderFn(fn, tpe, m, id, FnRole.Default).map(d => Some(FieldDefault.Fn(d): FieldDefault))
+          case _                            => F.pure(None)
+        }
+        normalize <- rawField.normalize match {
+          case Some(fn) => shellPlaceholderFn(fn, tpe, m, id, FnRole.Normalize).map(Some(_))
+          case None     => F.pure(None)
+        }
+        migrate <- rawField.migrate match {
+          case Some(mig) => shellPlaceholderFn(mig.fn, tpe, m, id, FnRole.Migrate).map(fn => Some(TypedMigrate(fn)))
+          case None      => F.pure(None)
+        }
+        computed <- prop match {
+          case Some(p) =>
+            p.field.default match {
+              case Some(RawDefaultValue.Fn(fn)) => shellPlaceholderFn(fn, tpe, p.meta, id, FnRole.Computed).map(Some(_))
+              case _                            => F.pure(None)
+            }
+          case None => F.pure(None)
+        }
+      } yield Field(
+        FieldName(rawField.name.name),
+        tpe,
+        rawField.prevName.map(pn => FieldName(pn.name)),
+        Docs.empty,
+        fdefault,
+        normalize,
+        migrate,
+        computed = computed,
+      )
+    }.map(fs => List(DomainMember.User(isRoot, produce(id, fs.toList, Nil), derived, meta)))
+  }
+
+  /** Signature-only placeholder `TypedFn`: real params + expected type so user-method
+    * resolution (`checkUserCall`) works for not-yet-translated types; the body is a
+    * dummy zero literal that is never lowered (shells are always overwritten by the
+    * full translation before `out` is built).
+    */
+  private def shellPlaceholderFn(
+    fn: RawFn,
+    expected: TypeRef,
+    meta: RawNodeMeta,
+    owner: TypeId.User,
+    role: FnRole,
+  ): F[NEList[BaboonIssue], model.TypedFn] = {
+    // Mirror of `FnPipeline.selfFor`: a bare `Self` param must NOT go through
+    // `convertTpe` (ScopeSupport has no `Self` binding and fails with
+    // UnexpectedNonBuiltin). `Computed`/`Migrate` self is the enclosing
+    // container (owner); `Default`/`Normalize` self is the field value.
+    F.traverseAccumErrors(fn.params.toList) { p =>
+      p.tpe match {
+        case RawTypeRef.Simple(n, _) if n.name == "Self" =>
+          val selfTpe = role match {
+            case FnRole.Computed | FnRole.Migrate   => TypeRef.Scalar(owner)
+            case FnRole.Default | FnRole.Normalize => expected
+          }
+          F.pure((p.name, selfTpe))
+        case other =>
+          convertTpe(other, meta).map(t => (p.name, t))
+      }
+    }.map { ps =>
+      val zero = expected match {
+        case TypeRef.Scalar(b) if b == TypeId.Builtins.bit => model.TypedLit.BoolLit(false)
+        case t if model.FnTypes.isFloat(t)                 => model.TypedLit.FloatLit(0.0)
+        case t if model.FnTypes.isInt(t)                   => model.TypedLit.IntLit(0)
+        case TypeRef.Scalar(b) if b == TypeId.Builtins.str => model.TypedLit.StrLit("")
+        case _                                             => model.TypedLit.IntLit(0)
+      }
+      model.TypedFn(None, model.TypedBody(Nil, model.TypedExpr.Lit(zero, expected), expected), expected, ps)
+    }
+  }
+
   private def convertMember(
     id: TypeId.User,
     defn: ExtendedRawDefn,
@@ -198,25 +327,14 @@ class BaboonTranslator[F[+_, +_]: Error2](
     fnSchemaFor(Typedef.Dto(owner, merged, Nil))
   }
 
-  /** `Self` in fn params/captures means the enclosing
-    * DTO. Rewritten translator-local before FnPipeline assembly (the
-    * pipeline resolves only concrete names against FnSchema). */
-  private def resolveSelf(owner: TypeId.User, fn: RawFn): RawFn = {
-    def rt(t: RawTypeRef): RawTypeRef = t match {
-      case RawTypeRef.Simple(n, pre) if n.name == "Self" =>
-        RawTypeRef.Simple(RawTypeName(owner.name.name), pre)
-      case other => other
-    }
-    fn.copy(
-      captures = fn.captures.map(c => c.copy(rootType = rt(c.rootType))),
-      params = fn.params.map(p => p.copy(tpe = rt(p.tpe))),
-    )
-  }
-
   /** Run one fn site through `FnPipeline.assemble` and project the IR node
     * to the model-level `TypedFn`. Plain-string pipeline errors are mapped
     * to `VerificationIssue.FnNotSupported` (owner + meta preserved so
     * diagnostics keep their positions); no new issue types.
+    *
+    * `Self` is resolved role-dependently by the pipeline (P2): computed /
+    * migrate `Self` is the owner container, default / normalize `Self` is
+    * the field's own value. No translator-local rewrite.
     */
   private def assembleFn(
     owner: TypeId.User,
@@ -230,7 +348,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     label: String,
     siblings: Seq[Field] = Nil,
   ): F[NEList[BaboonIssue], model.TypedFn] = {
-    val fn = resolveSelf(owner, rawFn)
+    val fn = rawFn
     val schema = fnSchemaForAll(owner, stubField, siblings)
     val sourcesR: Either[List[String], Set[SchemaPath]] =
       rawSources.foldRight(Right(Nil): Either[List[String], List[SchemaPath]]) { (s, acc) =>
@@ -250,7 +368,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
         FnPipeline.assemble(List(input)) match {
           case Right(prog) =>
             prog.fns.headOption match {
-              case Some((_, typed, _)) => F.pure(model.TypedFn(typed.capture, typed.body, typed.expected))
+              case Some((_, typed, _)) => F.pure(model.TypedFn(typed.capture, typed.body, typed.expected, typed.params))
               case None =>
                 F.fail(BaboonIssue.of(VerificationIssue.FnNotSupported(owner, s"$label fn: pipeline returned no fns", meta)))
             }

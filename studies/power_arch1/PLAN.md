@@ -80,6 +80,22 @@ Each study: inputs JSON + expected JSON + provenance JSON, checked in under this
 - `results.json`: per-point derived outputs.
 - `provenance.json`: `{ inputs, model_version, data_versions: { v_f, leak, meff }, results_hash }` — manual JSON for now.
 
+## Container-self simplification audit (2026-11-20)
+
+- All `= fn` computed use `self: Self` = enclosing container (`SoC`) with
+  sibling reads (`self.op.*`, `self.arch.*`, `self.scalars.*`, tables).
+  No fn treats `self` as a field value — compliant, no change needed.
+- Captures: self-only fns, zero extra captures (single-capture max satisfied
+  vacuously). No capture paths to narrow (`s: SoC.arch.cores.<field>` style
+  absent). No explicit `.Some`, no multi-capture, no `!` — nothing to drop.
+- Collections transparent: `for (p in self.leakTable / self.memTable /
+  self.vfTable)` iterates the collection field directly — compliant.
+- Parameterized child methods (curve lookup with an `x` argument): kept as
+  host-callable Python methods in `power_model.py` / study harness (Python
+  oracle). Thin `SoC` delegation stays host-side until intra-fn user-method
+  calls land (parser whitelist rejects them — banned, noted as gap, not
+  attempted). PENDING: re-lower lerp/lookup as intra-fn calls once supported.
+
 ## What stays manual
 
 - **Provenance JSON**: hand-written/stamped; no framework provenance record yet.

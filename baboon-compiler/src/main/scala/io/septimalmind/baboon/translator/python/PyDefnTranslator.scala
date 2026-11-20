@@ -777,6 +777,10 @@ object PyDefnTranslator {
           q"(${renderPyFnExpr(thenE, args, field)} if ${renderPyFnExpr(cond, args, field)} else ${renderPyFnExpr(elseE, args, field)})"
         case TypedExpr.Call(target, method, callArgs, _) =>
           renderPyFnCall(renderPyFnExpr(target, args, field), method, callArgs.map(renderPyFnExpr(_, args, field)), field)
+        case TypedExpr.UserCall(target, method, callArgs, _) =>
+          val recv = renderPyFnExpr(target, args, field)
+          val renderedArgs = callArgs.map(renderPyFnExpr(_, args, field))
+          q"$recv.${escapePyKeyword(method)}(${renderedArgs.join(", ")})"
         case other =>
           err(s"expression `${other.getClass.getSimpleName}`")
       }
@@ -817,11 +821,39 @@ object PyDefnTranslator {
     }
 
     private def renderPyAssertTrace(assert: TypedAssert, args: List[String], field: Field): TextTree[PyValue] = {
+      // One dict entry per participating path (not per root), so a failure
+      // reports only the involved values, e.g. `{'self.opsPerTask': self.opsPerTask}`.
+      // Indexed paths resolve the index in the key via an f-string, e.g.
+      // `{f"element[{i}]": element[i]}` renders `element[4]: -2` at runtime.
+      // Values reuse `renderPyFnExpr`, so rendering stays identical to the
+      // condition/value lowering above (incl. keyword escaping).
       val cond = renderPyFnExpr(assert.cond, args, field)
-      val vars =
-        assert.capturedVars.distinct.map(v => s"'$v': ${escapePyKeyword(v)}").mkString("{", ", ", "}")
+      val entries = assert.capturedVars.distinct.map { path =>
+        val value = renderPyFnExpr(path, args, field)
+        q"${renderPyAssertKey(path, args, field)}: $value"
+      }
+      val vars: TextTree[PyValue] =
+        if (entries.isEmpty) q"${"{}"}"
+        else q"${"{"}${entries.join(", ")}${"}"}"
       val msg = assert.msg.map(m => renderPyFnExpr(m, args, field)).getOrElse(q"None")
       q"$pyAssertTrace($cond, $vars, $msg)"
+    }
+
+    private def renderPyAssertKey(path: TypedExpr.Path, args: List[String], field: Field): TextTree[PyValue] = {
+      val hasIndex = path.segments.exists {
+        case _: TypedPathSeg.Index => true
+        case _                     => false
+      }
+      if (!hasIndex) {
+        val dotted = (path.root :: path.segments.collect { case TypedPathSeg.Field(name, _) => name }).mkString(".")
+        q"'$dotted'"
+      } else {
+        val inner = path.segments.foldLeft[TextTree[PyValue]](q"${path.root}") {
+          case (acc, TypedPathSeg.Field(name, _))  => q"$acc.$name"
+          case (acc, TypedPathSeg.Index(index, _)) => q"$acc${"{"}${renderPyFnExpr(index, args, field)}${"}"}"
+        }
+        q"f'$inner'"
+      }
     }
 
     // Full statement lowering for context fns (statement-bodied `@default`,
@@ -900,6 +932,7 @@ object PyDefnTranslator {
         case _: TypedExpr.Lit  => true
         case _: TypedExpr.Path => true
         case TypedExpr.Call(t, _, args, _)   => isPureExpr(t) && args.forall(isPureExpr)
+        case TypedExpr.UserCall(t, _, args, _) => isPureExpr(t) && args.forall(isPureExpr)
         case TypedExpr.BinOp(_, l, r, _)     => isPureExpr(l) && isPureExpr(r)
         case TypedExpr.UnaryOp(_, e, _)       => isPureExpr(e)
         case TypedExpr.If(c, t, e, _)         => isPureExpr(c) && isPureExpr(t) && isPureExpr(e)
@@ -1066,21 +1099,37 @@ object PyDefnTranslator {
     }
 
     private def renderPyComputedProperty(field: Field, fn: TypedFn): TextTree[PyValue] = {
-      // `= fn` computed fields are no-storage: a read-only `@property` getter
-      // evaluated on read. The capture root (when present and not `self`
-      // itself) aliases the instance; the fn result is the property value.
-      // Computed fields never enter `__init__` or the wire codecs.
+      // `= fn` computed fields are no-storage and never enter `__init__`
+      // or the wire codecs. Zero extra params => read-only `@property`
+      // getter; extra params (beyond `self`) => plain method
+      // `def name(self, t: ...)` (still non-wire, evaluates on call).
+      // Extra params are call-site values bound in scope with declared types.
       val lowering = new PyFnStmtLowering(field, "computed fn")
       val tpe      = domainTypes.asPyRef(fn.expected, fileTools.definitionsBasePkg)
       val propName = escapePyKeyword(field.name.name)
       val bindCapture = fn.capture.map(_.name).filterNot(_ == "self").toList.map {
         cap => q"${escapePyKeyword(cap)} = self"
       }
-      val (stmtLines, result) = lowering.lowerFn(fn, "self" :: fn.capture.map(_.name).toList, bindCapture)
-      q"""@property
-         |def $propName(self) -> $tpe:
-         |    ${(stmtLines :+ q"return $result").joinN().shift(4).trim}
-         |""".stripMargin
+      val extraParams = fn.params.filterNot(_._1 == "self")
+      val extraNames = extraParams.map(_._1)
+      val scope0 = "self" :: fn.capture.map(_.name).toList ++ extraNames
+      val (stmtLines, result) = lowering.lowerFn(fn, scope0, bindCapture)
+      if (extraParams.isEmpty) {
+        q"""@property
+           |def $propName(self) -> $tpe:
+           |    ${(stmtLines :+ q"return $result").joinN().shift(4).trim}
+           |""".stripMargin
+      } else {
+        val paramTrees: List[TextTree[PyValue]] = extraParams.map { case (n, t) =>
+          val pyT = domainTypes.asPyRef(t, fileTools.definitionsBasePkg)
+          val nm = escapePyKeyword(n)
+          q"$nm: $pyT"
+        }
+        val allParams = (List(q"self": TextTree[PyValue]) ++ paramTrees).join(", ")
+        q"""def $propName($allParams) -> $tpe:
+           |    ${(stmtLines :+ q"return $result").joinN().shift(4).trim}
+           |""".stripMargin
+      }
     }
 
     private def renderPyMigrateFn(ownerClass: String, field: Field, m: TypedMigrate): TextTree[PyValue] = {

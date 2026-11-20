@@ -56,6 +56,9 @@ final class FnPipelineTest extends AnyWordSpec {
   private def fn0(selfTpe: String, stmts: List[BodyStmt], result: BodyExpr): RawFn =
     RawFn(Nil, List(RawFnParam("self", rt(selfTpe))), rawBody(stmts, result))
 
+  private def fnSelfPlus(selfTpe: String, extra: String, extraTpe: String, result: BodyExpr): RawFn =
+    RawFn(Nil, List(RawFnParam("self", rt(selfTpe)), RawFnParam(extra, rt(extraTpe))), rawBody(Nil, result))
+
   private def fnCap(cap: RawCapture, selfTpe: String, stmts: List[BodyStmt], result: BodyExpr): RawFn =
     RawFn(List(cap), List(RawFnParam("self", rt(selfTpe))), rawBody(stmts, result))
 
@@ -151,6 +154,18 @@ final class FnPipelineTest extends AnyWordSpec {
       }
     }
 
+    "assemble a parameterized computed fn with local-only extra params" in {
+      val body = BodyExpr.BinOp("+", path("self", fld("count")), path("t"))
+      val sites = List(
+        in("Child", "grand", FnRole.Computed, fnSelfPlus("Child", "t", "i32", body)),
+      )
+      val p = mustAssemble(sites)
+      assert(p.fns.size == 1)
+      val (_, _, sens) = p.fns.head
+      assert(sens.leafReads == Set(sp("Child", "count")), s"extra param leaked into leafReads: ${sens.leafReads}")
+      assert(sens.prevReads.isEmpty)
+    }
+
     "cover every fn node in the emission order" in {
       val sites = List(
         in("Child", "count", FnRole.Default, fn0("Child", Nil, intLit(0))),
@@ -222,6 +237,45 @@ final class FnPipelineTest extends AnyWordSpec {
       val b = in("Basket", "b", FnRole.Default, fn0("Basket", Nil, path("self", fld("a"))))
       val errs = mustFail(List(a, b))
       assert(errs.exists(_.contains("cycle")), errs.mkString("; "))
+    }
+  }
+
+  "P7 Self roles" should {
+
+    "resolve computed self: Self to the owner container with sibling access" in {
+      val fn = RawFn(Nil, List(RawFnParam("self", rt("Self"))), rawBody(Nil, BodyExpr.BinOp("+", path("self", fld("count")), path("self", fld("total")))))
+      val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
+      val (_, typed, _) = p.fns.head
+      assert(typed.params == List("self" -> uref("Child")))
+      assert(typed.body.tpe == i32)
+    }
+
+    "resolve normalize self: Self to the field value type" in {
+      val fn = RawFn(Nil, List(RawFnParam("self", rt("Self"))), rawBody(Nil, BodyExpr.Call(path("self"), "trim", Nil)))
+      val p = mustAssemble(List(in("Child", "data", FnRole.Normalize, fn, expected = "str")))
+      val (_, typed, _) = p.fns.head
+      assert(typed.params == List("self" -> str))
+      assert(typed.body.tpe == str)
+    }
+
+    "resolve default self: Self to the field value type" in {
+      val fn = RawFn(Nil, List(RawFnParam("self", rt("Self"))), rawBody(Nil, path("self")))
+      val p = mustAssemble(List(in("Child", "count", FnRole.Default, fn)))
+      val (_, typed, _) = p.fns.head
+      assert(typed.params == List("self" -> i32))
+    }
+
+    "reject computed self annotated as the field scalar" in {
+      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn0("i32", Nil, intLit(0)))))
+      assert(errs.exists(_.contains("computed `self`")), errs.mkString("; "))
+      assert(!errs.exists(_.contains("cycle")), errs.mkString("; "))
+    }
+
+    "situate a capture path ending at the container" in {
+      val fn = fnCap(cap1("s", "Child"), "Child", Nil, path("s", fld("count")))
+      val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
+      val (_, typed, _) = p.fns.head
+      assert(typed.capture.map(_.endpoint) == Some(uref("Child")))
     }
   }
 }

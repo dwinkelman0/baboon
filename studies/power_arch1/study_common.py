@@ -8,17 +8,21 @@ import power_model as pm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Versioned model snapshot: resolve the schema via models/latest symlink,
-# falling back to the live schema file if the snapshot is absent.
+# Versioned model snapshot: the schema resolves via the models/latest symlink.
+# There is no live fallback — models/vX.Y.Z/soc.baboon is the single source.
 MODELS_DIR = os.path.join(HERE, "models")
 LATEST_LINK = os.path.join(MODELS_DIR, "latest")
 SCHEMA_SNAPSHOT = os.path.join(LATEST_LINK, "soc.baboon")
-SCHEMA_SOURCE = os.path.join(HERE, "soc.baboon")
 
 
 def schema_path():
-    """Prefer the versioned snapshot; fall back to the live schema file."""
-    return SCHEMA_SNAPSHOT if os.path.exists(SCHEMA_SNAPSHOT) else SCHEMA_SOURCE
+    """Versioned snapshot only; fail loudly if latest is missing."""
+    if not os.path.exists(SCHEMA_SNAPSHOT):
+        raise FileNotFoundError(
+            f"versioned schema snapshot missing: {SCHEMA_SNAPSHOT} "
+            "(models/latest symlink)"
+        )
+    return SCHEMA_SNAPSHOT
 
 REL_TOL_POWER = 1e-9   # power/energy: exact table lerp
 REL_TOL_PERFW = 1e-6   # perf/W division chain

@@ -1926,6 +1926,14 @@ object BaboonJS {
       case IneligibleUserMapKey(_, _, _, meta)                  => Some(meta.pos)
       case MapKeyMissingDerivation(_, _, _, _, meta)            => Some(meta.pos)
       case DataTypeExpectedField(_, _, meta)                    => Some(meta.pos)
+      case DefaultTypeMismatch(_, _, _, meta)                   => Some(meta.pos)
+      case DefaultOutOfRange(_, _, meta)                        => Some(meta.pos)
+      case DefaultNullOnRequired(_, meta)                       => Some(meta.pos)
+      case DefaultNotLeaf(_, _, meta)                           => Some(meta.pos)
+      case DefaultOnNonData(_, _, meta)                         => Some(meta.pos)
+      case ConflictingDefaults(_, _, _, meta)                   => Some(meta.pos)
+      case DefaultFnNotSupported(_, meta)                       => Some(meta.pos)
+      case FnNotSupported(_, _, meta)                           => Some(meta.pos)
       case _: LockedVersionModified                             => None
       case _: MissingTypeDef                                    => None
       case _: ReferentialCyclesFound                            => None
