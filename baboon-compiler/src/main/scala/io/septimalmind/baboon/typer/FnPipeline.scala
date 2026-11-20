@@ -28,6 +28,13 @@ object FnPipeline {
     expected: RawTypeRef,
     declaredSources: Set[SchemaPath],
     schema: FnSchema,
+    // Explicit gcRoot flag (DomainMember.User.root). Defaults false so
+    // existing call sites stay compatible; unknown/parentless owners are
+    // treated as root via the parentMap check below anyway. BaboonTranslator
+    // assembleFn sites should pass DomainMember.User.root here. #Assertion /
+    // #Provenance are implicitly root when added — no special code needed
+    // beyond honoring this flag.
+    ownerIsRoot: Boolean = false,
   )
 
   /** P7 IR node: one site lowered through P1→P3. Single-capture is structural:
@@ -142,6 +149,112 @@ object FnPipeline {
       case _ => FnTypes.ok(())
     }
 
+  /** Capture ancestry (general `fn` placement rule): a capture root `C` must
+    * be an ancestor-or-self of the decorated node `N` (`owner.field`).
+    * `C == N` when the capture root names the owner container itself;
+    * otherwise the owner type must be reachable from `C` by walking
+    * DTO/contract fields and ADT members/fields, peeling
+    * `opt`/`lst`/`set`/`map` layers. An unknown owner is skipped here
+    * (P4 reports it).
+    */
+  private def directChildUserNames(tpe: TypeRef): Set[String] = tpe match {
+    case TypeRef.Scalar(id) =>
+      id match {
+        case u: TypeId.User => Set(u.name.name)
+        case _              => Set.empty
+      }
+    case TypeRef.Constructor(_, args) =>
+      args.toList.flatMap(directChildUserNames).toSet
+    case TypeRef.Any(_, underlying) =>
+      underlying.map(directChildUserNames).getOrElse(Set.empty)
+  }
+
+  private def childTypeNamesOf(typeName: String, schema: FnSchema): Set[String] =
+    schema.lookup(typeName) match {
+      case Some(d: Typedef.Dto)      => d.fields.flatMap(f => directChildUserNames(f.tpe)).toSet
+      case Some(c: Typedef.Contract) => c.fields.flatMap(f => directChildUserNames(f.tpe)).toSet
+      case Some(a: Typedef.Adt) =>
+        a.fields.flatMap(f => directChildUserNames(f.tpe)).toSet ++ a.members.toList.map(_.name.name).toSet
+      case _ => Set.empty
+    }
+
+  private def parentMapOf(schema: FnSchema): Map[String, Set[String]] = {
+    val mut = scala.collection.mutable.Map.empty[String, Set[String]]
+    schema.types.keys.foreach { parent =>
+      childTypeNamesOf(parent, schema).foreach { child =>
+        mut(child) = mut.getOrElse(child, Set.empty) + parent
+      }
+    }
+    mut.toMap
+  }
+
+  /** C dominates N iff C == N or every upward path from N reaches C before
+    * a root (a type with no parents). Implemented as a bad-path search:
+    * walk up parent edges from N without stepping onto C; if any path
+    * bottoms at a root, C is not dominant. Cycles that avoid both C and
+    * any root yield no bad path (no witness against dominance).
+    */
+  private def dominates(capture: String, node: String, parents: Map[String, Set[String]]): Boolean = {
+    if (capture == node) true
+    else {
+      var visited = Set(node)
+      var stack = List(node)
+      while (stack.nonEmpty) {
+        val cur = stack.head
+        stack = stack.tail
+        if (cur != capture) {
+          val ps = parents.getOrElse(cur, Set.empty) - capture
+          if (ps.isEmpty) {
+            // Either cur is a root, or its only parents are the capture
+            // itself. The latter means this branch terminates at C (good);
+            // the former is a root reached without passing through C (bad).
+            val raw = parents.getOrElse(cur, Set.empty)
+            if (!raw.contains(capture)) return false
+          } else {
+            ps.foreach { p =>
+              if (!visited.contains(p)) {
+                visited += p
+                stack = p :: stack
+              }
+            }
+          }
+        }
+      }
+      true
+    }
+  }
+
+  private def checkCaptureAncestry(
+    site: FnSite,
+    in: FnSiteInputs,
+    schema: FnSchema,
+    cap: TypedCapture,
+  ): FnTypes.Res[Unit] =
+    schema.lookup(in.owner) match {
+      case Some(_: Typedef.User) =>
+        val roots = directChildUserNames(cap.rootType)
+        // Value captures (builtin/`any` roots name no user type) situate no
+        // container subtree, so ancestry is vacuous for them.
+        if (roots.isEmpty) FnTypes.ok(())
+        else if (roots.contains(in.owner)) FnTypes.ok(())
+        else {
+          val parents = parentMapOf(schema)
+          // Root rule: a root node may be instantiated without a parent, so
+          // any non-self capture would dangle on a parentless instance —
+          // even if the capture dominates in the static graph (gcRoot types
+          // can have incoming edges yet still exist parentless at runtime).
+          // Explicit ownerIsRoot covers those gcRoot cases; parentless in
+          // the parentMap (no incoming edges, or unknown) counts as root.
+          // #Assertion / #Provenance will be implicitly root when added.
+          val isRoot = in.ownerIsRoot || parents.getOrElse(in.owner, Set.empty).isEmpty
+          if (isRoot)
+            FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor-or-self of decorated node `${in.owner}.${in.field}` (root `${in.owner}` may be instantiated without a parent: only self-capture or no capture is allowed)")
+          else if (roots.exists(r => dominates(r, in.owner, parents))) FnTypes.ok(())
+          else FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor-or-self of decorated node `${in.owner}.${in.field}` (not dominant: reachable without passing through capture)")
+        }
+      case _ => FnTypes.ok(())
+    }
+
   private def pass2(p1: List[P1]): Either[List[String], List[P2]] = {
     val errs = List.newBuilder[String]
     val out = p1.flatMap { case P1(site, in) =>
@@ -168,10 +281,16 @@ object FnPipeline {
         }
       (expR, paramsR, capR) match {
         case (Right(exp), Right(params), Right((cap, bindings))) =>
-          checkComputedSelf(site, in, schema, params) match {
-            case Right(_) => Some(P2(site, in, exp, params, cap, bindings))
-            case Left(es) =>
-              es.foreach(errs += _)
+          val selfCheck = checkComputedSelf(site, in, schema, params)
+          val ancestryCheck = cap match {
+            case None    => FnTypes.ok(())
+            case Some(c) => checkCaptureAncestry(site, in, schema, c)
+          }
+          (selfCheck, ancestryCheck) match {
+            case (Right(_), Right(_)) => Some(P2(site, in, exp, params, cap, bindings))
+            case _ =>
+              selfCheck.left.toOption.foreach(_.foreach(errs += _))
+              ancestryCheck.left.toOption.foreach(_.foreach(errs += _))
               None
           }
         case _ =>
