@@ -347,6 +347,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     meta: RawNodeMeta,
     label: String,
     siblings: Seq[Field] = Nil,
+    ownerIsRoot: Boolean = false,
   ): F[NEList[BaboonIssue], model.TypedFn] = {
     val fn = rawFn
     val schema = fnSchemaForAll(owner, stubField, siblings)
@@ -364,7 +365,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
         val issues = es.flatMap(e => BaboonIssue.of(VerificationIssue.FnNotSupported(owner, s"$label fn: $e", meta)).toList)
         F.fail(NEList.unsafeFrom(issues))
       case Right(sources) =>
-        val input = FnPipeline.FnSiteInputs(fn, owner.name.name, fieldName, role, expectedRaw, sources, schema)
+        val input = FnPipeline.FnSiteInputs(fn, owner.name.name, fieldName, role, expectedRaw, sources, schema, ownerIsRoot)
         FnPipeline.assemble(List(input)) match {
           case Right(prog) =>
             prog.fns.headOption match {
@@ -384,6 +385,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     field: RawField,
     meta: RawNodeMeta,
     siblings: Seq[Field] = Nil,
+    ownerIsRoot: Boolean = false,
   ): F[NEList[BaboonIssue], Seq[Field]] = {
     for {
       name    <- F.pure(FieldName(field.name.name))
@@ -398,15 +400,15 @@ class BaboonTranslator[F[+_, +_]: Error2](
       docs = DocFormat.liftDocs(meta.docs)
       stubBase = Field(name, tpe, prevName, docs, None)
       fdefault <- field.default match {
-        case Some(d) => convertDefault(owner, name, tpe, d, stubBase, meta, field.tpe, siblings).map(Some(_))
+        case Some(d) => convertDefault(owner, name, tpe, d, stubBase, meta, field.tpe, siblings, ownerIsRoot).map(Some(_))
         case None    => F.pure(None)
       }
       normalize <- field.normalize match {
-        case Some(fn) => assembleFn(owner, name.name, FnRole.Normalize, fn, field.tpe, Nil, stubBase, meta, "normalize", siblings).map(Some(_))
+        case Some(fn) => assembleFn(owner, name.name, FnRole.Normalize, fn, field.tpe, Nil, stubBase, meta, "normalize", siblings, ownerIsRoot).map(Some(_))
         case None     => F.pure(None)
       }
       migrate <- field.migrate match {
-        case Some(m) => assembleFn(owner, name.name, FnRole.Migrate, m.fn, field.tpe, m.sources, stubBase, meta, "migrate", siblings).map(fn => Some(TypedMigrate(fn)))
+        case Some(m) => assembleFn(owner, name.name, FnRole.Migrate, m.fn, field.tpe, m.sources, stubBase, meta, "migrate", siblings, ownerIsRoot).map(fn => Some(TypedMigrate(fn)))
         case None    => F.pure(None)
       }
     } yield {
@@ -423,6 +425,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     meta: RawNodeMeta,
     expectedRaw: RawTypeRef,
     siblings: Seq[Field] = Nil,
+    ownerIsRoot: Boolean = false,
   ): F[NEList[BaboonIssue], FieldDefault] = {
     val targetType = tpe match {
       case TypeRef.Scalar(b: TypeId.BuiltinScalar) => b
@@ -443,7 +446,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
         }
         F.pure(FieldDefault.SpecialFloatVal(kind))
       case RawDefaultValue.Fn(fn) =>
-        assembleFn(owner, fieldName.name, FnRole.Default, fn, expectedRaw, Nil, stub, meta, "default", siblings).map(FieldDefault.Fn(_))
+        assembleFn(owner, fieldName.name, FnRole.Default, fn, expectedRaw, Nil, stub, meta, "default", siblings, ownerIsRoot).map(FieldDefault.Fn(_))
     }
   }
 
@@ -533,13 +536,13 @@ class BaboonTranslator[F[+_, +_]: Error2](
               F.pure(List.empty)
           }
         case f: RawDtoMember.FieldDef =>
-          dtoFieldToDefs(id, f.field, f.meta, siblingStubs)
+          dtoFieldToDefs(id, f.field, f.meta, siblingStubs, isRoot)
         case f: RawDtoMember.TemplateArmFieldDef =>
           // PR-33.9 [PR-33.3-D01]: typer-internal carrier produced by
           // `TemplateInstantiator.convertLoweredArm` (Plus arm) for fields originating from a
           // `+ Template[Args]` inline expansion. Field-level conversion is identical to
           // `FieldDef`; the variant tag only matters for the duplicate-name detection below.
-          dtoFieldToDefs(id, f.field, f.meta, siblingStubs)
+          dtoFieldToDefs(id, f.field, f.meta, siblingStubs, isRoot)
         case p: RawDtoMember.FnProperty =>
           p.field.default match {
             case Some(RawDefaultValue.Fn(fn)) =>
@@ -550,10 +553,10 @@ class BaboonTranslator[F[+_, +_]: Error2](
                 prevName = p.field.prevName.map(pn => FieldName(pn.name))
                 docs     = DocFormat.liftDocs(p.meta.docs)
                 stub     = Field(fname, ftpe, prevName, docs, None)
-                typed <- assembleFn(id, fname.name, FnRole.Computed, fn, p.field.tpe, Nil, stub, p.meta, "computed", siblingStubs)
+                typed <- assembleFn(id, fname.name, FnRole.Computed, fn, p.field.tpe, Nil, stub, p.meta, "computed", siblingStubs, isRoot)
               } yield Seq(Field(fname, ftpe, prevName, docs, None, computed = Some(typed)))
             case _ =>
-              dtoFieldToDefs(id, p.field, p.meta, siblingStubs)
+              dtoFieldToDefs(id, p.field, p.meta, siblingStubs, isRoot)
           }
         case p: RawDtoMember.ParentDef =>
           // PR-33.2 (M33): when args.isDefined, the TemplateInstantiator pre-pass has already
@@ -566,7 +569,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
       }
       removed <- F.flatTraverseAccumErrors(dto.members) {
         case f: RawDtoMember.UnfieldDef =>
-          dtoFieldToDefs(id, f.field, f.meta, siblingStubs)
+          dtoFieldToDefs(id, f.field, f.meta, siblingStubs, isRoot)
         case p: RawDtoMember.UnparentDef =>
           // PR-33.2 (M33): when args.isDefined, the TemplateInstantiator pre-pass has already
           // converted each substituted FieldDef into an UnfieldDef and spliced them into the
@@ -590,7 +593,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
           // Field equality matches the receiver's other-arm-produced fields exactly.
           // PR-33.2-D06: per-field meta is preserved on each FieldDef so diagnostics anchor at
           // the original template-body field declaration site (not at the `^` operator position).
-          F.flatTraverseAccumErrors(f.fields)(fd => dtoFieldToDefs(id, fd.field, fd.meta, siblingStubs))
+          F.flatTraverseAccumErrors(f.fields)(fd => dtoFieldToDefs(id, fd.field, fd.meta, siblingStubs, isRoot))
         case _ =>
           F.pure(Seq.empty)
       }

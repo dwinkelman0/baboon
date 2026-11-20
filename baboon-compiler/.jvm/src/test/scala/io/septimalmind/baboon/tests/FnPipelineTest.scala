@@ -34,12 +34,30 @@ final class FnPipelineTest extends AnyWordSpec {
     ),
     Nil,
   )
-  private val basketDto = Typedef.Dto(
-    uid("Basket"),
-    List(field("a", i32), field("b", i32)),
+  private val itemDto = Typedef.Dto(
+    uid("Item"),
+    List(field("label", str), field("qty", i32), field("price", i32)),
     Nil,
   )
-  private val schema = FnSchema(Map("Child" -> childDto, "Basket" -> basketDto), Map.empty)
+  private val basketDto = Typedef.Dto(
+    uid("Basket"),
+    List(field("a", i32), field("b", i32), field("items", ctor(TypeId.Builtins.lst, List(uref("Item"))))),
+    Nil,
+  )
+  private val cartDto = Typedef.Dto(
+    uid("Cart"),
+    List(field("c", i32), field("items", ctor(TypeId.Builtins.lst, List(uref("Item"))))),
+    Nil,
+  )
+  private val shopDto = Typedef.Dto(
+    uid("Shop"),
+    List(field("basket", uref("Basket")), field("cart", uref("Cart"))),
+    Nil,
+  )
+  // Diamond: Item is shared between Basket.items and Cart.items; Shop is the
+  // common root containing both parents. Basket alone dominates nothing
+  // below the diamond (every Item is also reachable via Cart).
+  private val schema = FnSchema(Map("Child" -> childDto, "Basket" -> basketDto, "Item" -> itemDto, "Cart" -> cartDto, "Shop" -> shopDto), Map.empty)
 
   // -- small AST builders -----------------------------------------------------
 
@@ -276,6 +294,85 @@ final class FnPipelineTest extends AnyWordSpec {
       val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
       val (_, typed, _) = p.fns.head
       assert(typed.capture.map(_.endpoint) == Some(uref("Child")))
+    }
+  }
+
+  "P7 capture ancestry" should {
+
+    "pass a self capture (root is the owner)" in {
+      val fn = fnCap(cap1("s", "Child"), "Child", Nil, path("s", fld("count")))
+      val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
+      assert(p.fns.size == 1)
+    }
+
+    "pass a self capture on shared Item (root is the owner)" in {
+      val fn = fnCap(cap1("s", "Item"), "Item", Nil, path("s", fld("price")))
+      val p = mustAssemble(List(in("Item", "qty", FnRole.Computed, fn)))
+      assert(p.fns.size == 1)
+    }
+
+    "pass a common-root capture (Shop dominates shared Item)" in {
+      val fn = fnCap(cap1("s", "Shop"), "Item", Nil, path("s", fld("basket"), fld("a")))
+      val p = mustAssemble(List(in("Item", "qty", FnRole.Computed, fn)))
+      assert(p.fns.size == 1)
+    }
+
+    "reject a non-dominant ancestor capture (Basket does not dominate shared Item)" in {
+      val fn = fnCap(cap1("b", "Basket"), "Item", Nil, path("b", fld("a")))
+      val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+      assert(errs.exists(_.contains("not dominant")), errs.mkString("; "))
+    }
+
+    "reject a non-dominant ancestor capture (Cart does not dominate shared Item)" in {
+      val fn = fnCap(cap1("c", "Cart"), "Item", Nil, path("c", fld("c")))
+      val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+      assert(errs.exists(_.contains("not dominant")), errs.mkString("; "))
+    }
+
+    "reject a sibling capture (Child fn capturing Basket)" in {
+      val fn = fnCap(cap1("b", "Basket"), "Child", Nil, path("b", fld("a")))
+      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+    }
+
+    "reject an unrelated capture (Item fn capturing Child)" in {
+      val fn = fnCap(cap1("c", "Child"), "Item", Nil, path("c", fld("count")))
+      val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+    }
+
+    "reject a non-self capture on a root (Child fn capturing Basket)" in {
+      // Child has no parents in the parentMap, so it is a root: it may be
+      // instantiated without a parent, and any non-self capture would dangle.
+      val fn = fnCap(cap1("b", "Basket"), "Child", Nil, path("b", fld("a")))
+      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
+    }
+
+    "reject a dominating capture on an explicit gcRoot (Item marked root capturing Shop)" in {
+      // Shop statically dominates Item, but a gcRoot Item can exist
+      // parentless at runtime, so the capture would dangle.
+      val fn = fnCap(cap1("s", "Shop"), "Item", Nil, path("s", fld("basket"), fld("a")))
+      val site = in("Item", "qty", FnRole.Computed, fn).copy(ownerIsRoot = true)
+      val errs = mustFail(List(site))
+      assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
+    }
+
+    "pass a self-capture on an explicit gcRoot (Item marked root capturing Item)" in {
+      val fn = fnCap(cap1("s", "Item"), "Item", Nil, path("s", fld("price")))
+      val site = in("Item", "qty", FnRole.Computed, fn).copy(ownerIsRoot = true)
+      val p = mustAssemble(List(site))
+      assert(p.fns.size == 1)
+    }
+
+    "pass a root fn with no capture (explicit gcRoot, parentless Shop)" in {
+      val p1 = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn0("Child", Nil, path("self", fld("total"))))))
+      assert(p1.fns.size == 1)
+      val site = in("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("self", fld("price")))).copy(ownerIsRoot = true)
+      val p2 = mustAssemble(List(site))
+      assert(p2.fns.size == 1)
     }
   }
 }
