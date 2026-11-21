@@ -242,6 +242,9 @@ object FnSensitivityExtractor {
           shapeB ++= tmpS
         case Some(ScopeEntry.LetBinding(t)) =>
           userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
+        case Some(ScopeEntry.KeyVar(t)) =>
+          // Read-only capture key var: readable, extends like a local value.
+          userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
         case Some(ScopeEntry.StarChain(_)) =>
           capture match {
             case None =>
@@ -277,6 +280,8 @@ object FnSensitivityExtractor {
               () // locals (lets, for binders, match bindings) are never field writes
             case Some(_: ScopeEntry.StarChain) =>
               errors += s"cannot assign to star chain: ${p.root}"
+            case Some(_: ScopeEntry.KeyVar) =>
+              errors += s"cannot assign to capture key var: ${p.root}"
             case Some(_: ScopeEntry.CaptureRoot) | Some(_: ScopeEntry.Param) =>
               if (p.segments.isEmpty) {
                 // Whole-record replacement carries struct semantics: every field is written.

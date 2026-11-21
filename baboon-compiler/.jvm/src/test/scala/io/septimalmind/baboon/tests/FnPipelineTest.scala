@@ -98,6 +98,16 @@ final class FnPipelineTest extends AnyWordSpec {
     sources: Set[SchemaPath] = Set.empty,
   ): FnSiteInputs = FnSiteInputs(fn, owner, f, role, rt(expected), sources, schema)
 
+  private def inN(
+    owner: String,
+    f: String,
+    role: FnRole,
+    fn: RawFn,
+    nodeCap: RawCapture,
+    expected: String = "i32",
+    sources: Set[SchemaPath] = Set.empty,
+  ): FnSiteInputs = FnSiteInputs(fn, owner, f, role, rt(expected), sources, schema, nodeCapture = Some(nodeCap))
+
   private def mustAssemble(sites: List[FnSiteInputs]): ValidatedFnProgram =
     FnPipeline.assemble(sites) match {
       case Right(p)  => p
@@ -291,24 +301,23 @@ final class FnPipelineTest extends AnyWordSpec {
 
     "situate a capture path ending at the container" in {
       val fn = fnCap(cap1("s", "Child"), "Child", Nil, path("s", fld("count")))
-      val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
-      val (_, typed, _) = p.fns.head
-      assert(typed.capture.map(_.endpoint) == Some(uref("Child")))
+      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
     }
   }
 
   "P7 capture ancestry" should {
 
-    "pass a self capture (root is the owner)" in {
+    "reject a self capture (root is the owner) as redundant" in {
       val fn = fnCap(cap1("s", "Child"), "Child", Nil, path("s", fld("count")))
-      val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
-      assert(p.fns.size == 1)
+      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
     }
 
-    "pass a self capture on shared Item (root is the owner)" in {
+    "reject a self capture on shared Item as redundant" in {
       val fn = fnCap(cap1("s", "Item"), "Item", Nil, path("s", fld("price")))
-      val p = mustAssemble(List(in("Item", "qty", FnRole.Computed, fn)))
-      assert(p.fns.size == 1)
+      val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
     }
 
     "pass a common-root capture (Shop dominates shared Item)" in {
@@ -320,27 +329,27 @@ final class FnPipelineTest extends AnyWordSpec {
     "reject a non-dominant ancestor capture (Basket does not dominate shared Item)" in {
       val fn = fnCap(cap1("b", "Basket"), "Item", Nil, path("b", fld("a")))
       val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+      assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
       assert(errs.exists(_.contains("not dominant")), errs.mkString("; "))
     }
 
     "reject a non-dominant ancestor capture (Cart does not dominate shared Item)" in {
       val fn = fnCap(cap1("c", "Cart"), "Item", Nil, path("c", fld("c")))
       val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+      assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
       assert(errs.exists(_.contains("not dominant")), errs.mkString("; "))
     }
 
     "reject a sibling capture (Child fn capturing Basket)" in {
       val fn = fnCap(cap1("b", "Basket"), "Child", Nil, path("b", fld("a")))
       val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+      assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
     }
 
     "reject an unrelated capture (Item fn capturing Child)" in {
       val fn = fnCap(cap1("c", "Child"), "Item", Nil, path("c", fld("count")))
       val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("not an ancestor-or-self")), errs.mkString("; "))
+      assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
     }
 
     "reject a non-self capture on a root (Child fn capturing Basket)" in {
@@ -360,11 +369,11 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
     }
 
-    "pass a self-capture on an explicit gcRoot (Item marked root capturing Item)" in {
+    "reject a self-capture on an explicit gcRoot (Item capturing Item) as redundant" in {
       val fn = fnCap(cap1("s", "Item"), "Item", Nil, path("s", fld("price")))
       val site = in("Item", "qty", FnRole.Computed, fn).copy(ownerIsRoot = true)
-      val p = mustAssemble(List(site))
-      assert(p.fns.size == 1)
+      val errs = mustFail(List(site))
+      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
     }
 
     "pass a root fn with no capture (explicit gcRoot, parentless Shop)" in {
@@ -373,6 +382,105 @@ final class FnPipelineTest extends AnyWordSpec {
       val site = in("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("self", fld("price")))).copy(ownerIsRoot = true)
       val p2 = mustAssemble(List(site))
       assert(p2.fns.size == 1)
+    }
+  }
+
+  "P7 node capture" should {
+
+    "share one node capture across every fn of the node" in {
+      val nc = cap1("s", "Shop")
+      val a  = inN("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("s", fld("basket"), fld("a"))), nc)
+      val b  = inN("Item", "price", FnRole.Computed, fn0("Item", Nil, path("s", fld("cart"), fld("c"))), nc)
+      val p  = mustAssemble(List(a, b))
+      assert(p.fns.size == 2)
+      p.fns.foreach { case (_, typed, _) =>
+        assert(typed.capture.map(_.endpoint) == Some(uref("Shop")))
+      }
+    }
+
+    "reject a per-fn capture when the node already has @capture" in {
+      val nc = cap1("s", "Shop")
+      val fn = fnCap(cap1("b", "Basket"), "Item", Nil, path("b", fld("a")))
+      val errs = mustFail(List(inN("Item", "qty", FnRole.Computed, fn, nc)))
+      assert(errs.exists(_.contains("only one source")), errs.mkString("; "))
+    }
+
+    "reject a node self-capture as redundant" in {
+      val nc = cap1("s", "Item")
+      val errs = mustFail(List(inN("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("s", fld("price"))), nc)))
+      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
+    }
+
+    "reject a node capture on a root node" in {
+      val nc = cap1("b", "Basket")
+      val errs = mustFail(List(inN("Child", "grand", FnRole.Computed, fn0("Child", Nil, path("b", fld("a"))), nc)))
+      assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
+    }
+
+    "expose node-capture key vars as read-only locals in every fn" in {
+      val nc = RawCapture(
+        "s",
+        rt("Shop"),
+        List(
+          RawCaptureStep.Single(RawLocatorSeg.Field("basket")),
+          RawCaptureStep.Single(RawLocatorSeg.Field("items")),
+          RawCaptureStep.Single(RawLocatorSeg.Key("k")),
+        ),
+      )
+      val p = mustAssemble(List(inN("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("k")), nc)))
+      assert(p.fns.size == 1)
+      val bad = RawFn(
+        Nil,
+        List(RawFnParam("self", rt("Item"))),
+        rawBody(List(BodyStmt.Effect(BodyExpr.Assign(path("k"), intLit(1)))), intLit(0)),
+      )
+      val errs = mustFail(List(inN("Item", "qty", FnRole.Computed, bad, nc)))
+      assert(errs.exists(_.contains("cannot assign to capture key var")), errs.mkString("; "))
+    }
+
+    "reject a node capture on a direct member of a capturing parent" in {
+      val parentNc = cap1("s", "Shop")
+      val childNc = cap1("s", "Shop")
+      val parent = inN("Basket", "a", FnRole.Computed, fn0("Basket", Nil, path("s", fld("basket"), fld("a"))), parentNc)
+      val child = inN("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("s", fld("basket"), fld("a"))), childNc)
+      val errs = mustFail(List(parent, child))
+      assert(errs.exists(_.contains("nested capture not allowed")), errs.mkString("; "))
+      assert(errs.exists(e => e.contains("`Item`") && e.contains("`Basket`")), errs.mkString("; "))
+    }
+
+    "reject a per-fn capture on a direct member of a capturing parent" in {
+      val parentNc = cap1("s", "Shop")
+      val parent = inN("Basket", "a", FnRole.Computed, fn0("Basket", Nil, path("s", fld("basket"), fld("a"))), parentNc)
+      val childFn = fnCap(cap1("s", "Shop"), "Item", Nil, path("s", fld("basket"), fld("a")))
+      val errs = mustFail(List(parent, in("Item", "qty", FnRole.Computed, childFn)))
+      assert(errs.exists(_.contains("nested capture not allowed")), errs.mkString("; "))
+    }
+
+    "pass a direct member with no capture under a capturing parent" in {
+      val parentNc = cap1("s", "Shop")
+      val parent = inN("Basket", "a", FnRole.Computed, fn0("Basket", Nil, path("s", fld("basket"), fld("a"))), parentNc)
+      val child = in("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("self", fld("price"))))
+      val p = mustAssemble(List(parent, child))
+      assert(p.fns.size == 2)
+    }
+
+    "allow a grandchild capture via a non-capturing intermediary" in {
+      val rTop = Typedef.Dto(uid("RTop"), List(field("a", uref("ATop"))), Nil)
+      val aTop = Typedef.Dto(uid("ATop"), List(field("m", uref("Mid"))), Nil)
+      val mid = Typedef.Dto(uid("Mid"), List(field("b", uref("Bot")), field("w", i32)), Nil)
+      val bot = Typedef.Dto(uid("Bot"), List(field("v", i32)), Nil)
+      val chain = FnSchema(Map("RTop" -> rTop, "ATop" -> aTop, "Mid" -> mid, "Bot" -> bot), Map.empty)
+      def chainInN(owner: String, f: String, fn: RawFn, nc: RawCapture): FnSiteInputs =
+        FnSiteInputs(fn, owner, f, FnRole.Computed, rt("i32"), Set.empty, chain, nodeCapture = Some(nc))
+      def chainIn(owner: String, f: String, fn: RawFn): FnSiteInputs =
+        FnSiteInputs(fn, owner, f, FnRole.Computed, rt("i32"), Set.empty, chain)
+      val topNc = cap1("s", "RTop")
+      val botNc = cap1("s", "RTop")
+      val top = chainInN("ATop", "m", fn0("ATop", Nil, path("s", fld("a"), fld("m"), fld("b"), fld("v"))), topNc)
+      val between = chainIn("Mid", "w", fn0("Mid", Nil, path("self", fld("b"), fld("v"))))
+      val leaf = chainInN("Bot", "v", fn0("Bot", Nil, path("s", fld("a"), fld("m"), fld("b"), fld("v"))), botNc)
+      val p = mustAssemble(List(top, between, leaf))
+      assert(p.fns.size == 3)
     }
   }
 }

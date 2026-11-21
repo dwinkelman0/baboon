@@ -10,9 +10,9 @@ class DefContract(context: ParserContext, meta: DefMeta, dto: DefDto) {
   Quirks.discard(context)
   def contractEnclosed[$: P]: P[RawContract] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.contract, dto.templateHead.? ~ struct.enclosed(dto.dto))).map {
-      case (meta, name, (tps, members)) =>
-        RawContract(RawTypeName(name), members, meta, tps.getOrElse(Nil))
+    P(dto.captureAnnotation.? ~ meta.member(kw.contract, dto.templateHead.? ~ struct.enclosed(dto.dto))).map {
+      case (cap, (meta, name, (tps, members))) =>
+        RawContract(RawTypeName(name), members, meta, tps.getOrElse(Nil), None, cap)
     }
   }
 }

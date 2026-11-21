@@ -1,6 +1,6 @@
 package io.septimalmind.baboon.typer
 
-import io.septimalmind.baboon.parser.model.{RawFn, RawTypeName, RawTypeRef}
+import io.septimalmind.baboon.parser.model.{RawCapture, RawFn, RawTypeName, RawTypeRef}
 import io.septimalmind.baboon.typer.FnSensitivityExtractor.Slot
 import io.septimalmind.baboon.typer.model._
 
@@ -19,6 +19,9 @@ object FnPipeline {
     * `declaredSources` is the migrate source set (empty for other roles);
     * `schema` is the minimal P2/P3 view — all inputs in one batch are
     * expected to share it (P5/P6 run against the first input's view).
+    * `nodeCapture` is the node-level `@capture(...)` annotation (once per
+    * node, shared by every fn of the owner); per-fn `[...]` heads and a
+    * node capture are mutually exclusive.
     */
   final case class FnSiteInputs(
     rawFn: RawFn,
@@ -35,6 +38,7 @@ object FnPipeline {
     // #Provenance are implicitly root when added — no special code needed
     // beyond honoring this flag.
     ownerIsRoot: Boolean = false,
+    nodeCapture: Option[RawCapture] = None,
   )
 
   /** P7 IR node: one site lowered through P1→P3. Single-capture is structural:
@@ -150,9 +154,10 @@ object FnPipeline {
     }
 
   /** Capture ancestry (general `fn` placement rule): a capture root `C` must
-    * be an ancestor-or-self of the decorated node `N` (`owner.field`).
-    * `C == N` when the capture root names the owner container itself;
-    * otherwise the owner type must be reachable from `C` by walking
+    * be a strict ancestor of the decorated node `N` (`owner.field`).
+    * Self-capture (`C == N`) is rejected as redundant: `self: Self` already
+    * covers it, so the capture root must strictly dominate the owner type,
+    * reachable from `C` by walking
     * DTO/contract fields and ADT members/fields, peeling
     * `opt`/`lst`/`set`/`map` layers. An unknown owner is skipped here
     * (P4 reports it).
@@ -188,11 +193,13 @@ object FnPipeline {
     mut.toMap
   }
 
-  /** C dominates N iff C == N or every upward path from N reaches C before
+  /** C dominates N iff every upward path from N reaches C before
     * a root (a type with no parents). Implemented as a bad-path search:
     * walk up parent edges from N without stepping onto C; if any path
     * bottoms at a root, C is not dominant. Cycles that avoid both C and
     * any root yield no bad path (no witness against dominance).
+    * (C == N is dominance in the graph sense, but self-capture is rejected
+    * separately as redundant — see `checkCaptureAncestry`.)
     */
   private def dominates(capture: String, node: String, parents: Map[String, Set[String]]): Boolean = {
     if (capture == node) true
@@ -236,11 +243,12 @@ object FnPipeline {
         // Value captures (builtin/`any` roots name no user type) situate no
         // container subtree, so ancestry is vacuous for them.
         if (roots.isEmpty) FnTypes.ok(())
-        else if (roots.contains(in.owner)) FnTypes.ok(())
+        else if (roots.contains(in.owner))
+          FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is redundant: self is already `self: Self`; capture is for ancestors only")
         else {
           val parents = parentMapOf(schema)
           // Root rule: a root node may be instantiated without a parent, so
-          // any non-self capture would dangle on a parentless instance —
+          // any capture would dangle on a parentless instance —
           // even if the capture dominates in the static graph (gcRoot types
           // can have incoming edges yet still exist parentless at runtime).
           // Explicit ownerIsRoot covers those gcRoot cases; parentless in
@@ -248,15 +256,63 @@ object FnPipeline {
           // #Assertion / #Provenance will be implicitly root when added.
           val isRoot = in.ownerIsRoot || parents.getOrElse(in.owner, Set.empty).isEmpty
           if (isRoot)
-            FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor-or-self of decorated node `${in.owner}.${in.field}` (root `${in.owner}` may be instantiated without a parent: only self-capture or no capture is allowed)")
+            FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor of decorated node `${in.owner}.${in.field}` (root `${in.owner}` may be instantiated without a parent: no capture is allowed)")
           else if (roots.exists(r => dominates(r, in.owner, parents))) FnTypes.ok(())
-          else FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor-or-self of decorated node `${in.owner}.${in.field}` (not dominant: reachable without passing through capture)")
+          else FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor of decorated node `${in.owner}.${in.field}` (not dominant: reachable without passing through capture)")
         }
       case _ => FnTypes.ok(())
     }
 
+  /** No-nested-captures: if a struct A declares node-level `@capture`, any
+    * direct field-member B of A already sees that context via its enclosing
+    * A instance, so B may not declare its own capture (node `@capture` or
+    * per-fn `[...]`) — B's fns use A's capture. Only direct members are
+    * rejected; a grandchild reachable solely via non-capturing intermediaries
+    * may still capture.
+    */
+  private def checkNestedCapture(
+    site: FnSite,
+    in: FnSiteInputs,
+    schema: FnSchema,
+    capturingOwners: Set[String],
+  ): FnTypes.Res[Unit] = {
+    val hasOwnCapture = in.nodeCapture.isDefined || in.rawFn.captures.nonEmpty
+    if (!hasOwnCapture) FnTypes.ok(())
+    else {
+      val offenders =
+        capturingOwners.filter(a => a != in.owner && childTypeNamesOf(a, schema).contains(in.owner))
+      if (offenders.isEmpty) FnTypes.ok(())
+      else {
+        val parent = offenders.toList.sorted.head
+        FnTypes.fail(s"${tag(site)}: nested capture not allowed: `${in.owner}` is a member of capturing `${parent}`; use the parent's capture")
+      }
+    }
+  }
+
   private def pass2(p1: List[P1]): Either[List[String], List[P2]] = {
     val errs = List.newBuilder[String]
+    // Node-level @capture resolves once per owner: every fn of the node
+    // shares the same typed capture and scope bindings.
+    val nodeResolved = scala.collection.mutable.Map.empty[String, (TypedCapture, List[(String, ScopeEntry)])]
+    p1.groupBy(_.in.owner).foreach { case (owner, sites) =>
+      val raws = sites.flatMap(_.in.nodeCapture).distinct
+      if (raws.size > 1)
+        errs += s"node `$owner` declares ${raws.size} distinct @capture annotations, at most one is allowed"
+      raws.headOption.foreach { raw =>
+        // No role-dependent `Self` rewrite: a node capture names an ancestor
+        // type shared by fns of every role (`Self` would be ambiguous here,
+        // and `Self` == owner is rejected as redundant self-capture anyway).
+        FnCaptureResolver.resolveCapture(raw, sites.head.in.schema).left.map(_.map(m => s"node `$owner` @capture: $m")) match {
+          case Right(v) => nodeResolved(owner) = v
+          case Left(es) => es.foreach(errs += _)
+        }
+      }
+    }
+    // Owners declaring node-level @capture in this batch (declared intent,
+    // even if resolution failed): direct members of these owners may not
+    // declare their own capture (no-nested-captures).
+    val capturingOwners: Set[String] =
+      p1.collect { case P1(_, in) if in.nodeCapture.isDefined => in.owner }.toSet
     val out = p1.flatMap { case P1(site, in) =>
       val schema = in.schema
       val expR = FnTypes
@@ -268,15 +324,19 @@ object FnPipeline {
           FnTypes.resolveRaw(selfFor(in.role, in.owner, in.expected, p.tpe), schema).left.map(_.map(m => s"${tag(site)}: param `${p.name}`: $m")).map(t => p.name -> t)
         })
       val capR: FnTypes.Res[(Option[TypedCapture], List[(String, ScopeEntry)])] =
-        in.rawFn.captures match {
-          case Nil => FnTypes.ok((None, Nil))
-          case cap :: Nil =>
+        (nodeResolved.get(in.owner), in.rawFn.captures) match {
+          case (Some(_), _ :: _) =>
+            FnTypes.fail(s"${tag(site)}: node `${in.owner}` has @capture and this fn also declares a capture: only one source is allowed (remove the per-fn `[...]` head)")
+          case (Some((c, b)), Nil) =>
+            FnTypes.ok((Some(c), b))
+          case (None, Nil) => FnTypes.ok((None, Nil))
+          case (None, cap :: Nil) =>
             FnCaptureResolver
               .resolveCapture(cap.copy(rootType = selfFor(in.role, in.owner, in.expected, cap.rootType)), schema)
               .left
               .map(_.map(m => s"${tag(site)}: $m"))
               .map { case (c, b) => (Some(c), b) }
-          case many =>
+          case (None, many) =>
             FnTypes.fail(s"${tag(site)}: fn has ${many.size} captures, at most one is allowed")
         }
       (expR, paramsR, capR) match {
@@ -286,11 +346,13 @@ object FnPipeline {
             case None    => FnTypes.ok(())
             case Some(c) => checkCaptureAncestry(site, in, schema, c)
           }
-          (selfCheck, ancestryCheck) match {
-            case (Right(_), Right(_)) => Some(P2(site, in, exp, params, cap, bindings))
+          val nestedCheck = checkNestedCapture(site, in, schema, capturingOwners)
+          (selfCheck, ancestryCheck, nestedCheck) match {
+            case (Right(_), Right(_), Right(_)) => Some(P2(site, in, exp, params, cap, bindings))
             case _ =>
               selfCheck.left.toOption.foreach(_.foreach(errs += _))
               ancestryCheck.left.toOption.foreach(_.foreach(errs += _))
+              nestedCheck.left.toOption.foreach(_.foreach(errs += _))
               None
           }
         case _ =>
