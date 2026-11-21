@@ -82,7 +82,7 @@ Each study: inputs JSON + expected JSON + provenance JSON, checked in under this
 
 ## Container-self simplification audit (2026-11-20)
 
-- All `= fn` computed use `self: Self` = enclosing container (`SoC`) with
+- All `= fn` computed use `self` = enclosing container (`SoC`) with
   sibling reads (`self.op.*`, `self.arch.*`, `self.scalars.*`, tables).
   No fn treats `self` as a field value — compliant, no change needed.
 - Captures: self-only fns, zero extra captures (single-capture max satisfied

@@ -89,8 +89,8 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       assert(fn.body.result == BodyExpr.Path("p", List(BodyExpr.Segment.Field("name"))))
     }
 
-    "parse @default(fn[p: Parent](self: Self) { self.x })" in {
-      val f = onlyField("data D { @default(fn[p: Parent](self: Self) { self.x }) x: str }")
+    "parse @default(fn[p: Parent](self) { self.x })" in {
+      val f = onlyField("data D { @default(fn[p: Parent](self) { self.x }) x: str }")
       val fn = unwrapFn(f.field.default)
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "p")
@@ -100,8 +100,8 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       assert(fn.body.result == BodyExpr.Path("self", List(BodyExpr.Segment.Field("x"))))
     }
 
-    "parse @normalize(fn[t: Parent](self: Self) { self.trim() })" in {
-      val f = onlyField("data D { @normalize(fn[t: Parent](self: Self) { self.trim() }) x: str }")
+    "parse @normalize(fn[t: Parent](self) { self.trim() })" in {
+      val f = onlyField("data D { @normalize(fn[t: Parent](self) { self.trim() }) x: str }")
       val fn = f.field.normalize.getOrElse(fail("expected normalize fn"))
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "t")
@@ -130,7 +130,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     }
 
     "parse a read-only fn property" in {
-      val p = onlyProperty("data D { area: f32 = fn(self: Self) { self.width * self.height } }")
+      val p = onlyProperty("data D { area: f32 = fn(self) { self.width * self.height } }")
       val fn = unwrapFn(p.field.default)
       assert(p.field.name == RawFieldName("area"))
       assertSimpleType(p.field.tpe, "f32")
@@ -143,13 +143,23 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       ))
     }
 
+    "accept the legacy self: Self alias the same as bare self" in {
+      val p = onlyProperty("data D { area: f32 = fn(self: Self) { self.width * self.height } }")
+      val fn = unwrapFn(p.field.default)
+      assert(fn.params.size == 1)
+      assert(fn.params.head.name == "self")
+      assertSimpleType(fn.params.head.tpe, "Self")
+      val bare = onlyProperty("data D { area: f32 = fn(self) { self.width * self.height } }")
+      assert(unwrapFn(bare.field.default).params == fn.params)
+    }
+
     "parse a computed fn whose capture situates the container" in {
       // `= fn` (FnProperty/computed) captures situate the enclosing container:
       // `s: MyStruct.member` binds `s` to that member (transparent through
-      // opt/set, `.Some` implied), while `self: Self` is the container
+      // opt/set, `.Some` implied), while `self` is the container
       // instance itself — contrast `@normalize` / `@default(fn)`, where
       // `self` is the field's own value. Parser-level only: roles resolve in P2.
-      val p = onlyProperty("data D { area: f32 = fn[s: MyStruct.member](self: Self) { self.width } }")
+      val p = onlyProperty("data D { area: f32 = fn[s: MyStruct.member](self) { self.width } }")
       val fn = unwrapFn(p.field.default)
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "s")
@@ -268,14 +278,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     }
 
     "parse @normalize with let and if/else" in {
-      val f = onlyField("data D { @normalize(fn[t: T](self: Self) { let v = self.x; if v { 1 } else { 2 } }) x: str }")
+      val f = onlyField("data D { @normalize(fn[t: T](self) { let v = self.x; if v { 1 } else { 2 } }) x: str }")
       val fn = f.field.normalize.getOrElse(fail("expected normalize fn"))
       assert(fn.body.letBindings == List(("v", BodyExpr.Path("self", List(BodyExpr.Segment.Field("x"))))))
       assert(fn.body.result.isInstanceOf[BodyExpr.If])
     }
 
     "parse fn property with captures" in {
-      val p = onlyProperty("data D { area: f32 = fn[p: Parent](self: Self) { self.width } }")
+      val p = onlyProperty("data D { area: f32 = fn[p: Parent](self) { self.width } }")
       val fn = unwrapFn(p.field.default)
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "p")
@@ -286,7 +296,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     }
 
     "parse computed fn with external args" in {
-      val p = onlyProperty("data D { curve: f32 = fn(self: Self, t: f32) { self.base + t } }")
+      val p = onlyProperty("data D { curve: f32 = fn(self, t: f32) { self.base + t } }")
       val fn = unwrapFn(p.field.default)
       assert(fn.params.size == 2)
       assert(fn.params.map(_.name) == List("self", "t"))
@@ -554,7 +564,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       val efn = unwrapFn(e.field.default)
       assert(efn.captures.isEmpty && efn.params.isEmpty)
       assert(efn.body.result == BodyExpr.Lit(BodyLiteral.IntLit(1)))
-      val p = onlyField("data D { @default(fn(self: Self) { self.x }) x: str }")
+      val p = onlyField("data D { @default(fn(self) { self.x }) x: str }")
       val pfn = unwrapFn(p.field.default)
       assert(pfn.captures.isEmpty && pfn.params.size == 1)
       assert(pfn.params.head.name == "self")
@@ -626,7 +636,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
           assert(field.default.contains(RawDefaultValue.IntLit(42, "42")))
         case other => fail(s"expected FieldDef, got $other")
       }
-      val n = onlyField("data D { @normalize(fn[t: T](self: Self) { self }) x: str }")
+      val n = onlyField("data D { @normalize(fn[t: T](self) { self }) x: str }")
       assert(n.field.normalize.isDefined)
       assert(n.field.default.isEmpty)
       val zero = onlyField("data D { @migrate(fn[old: S]() { old }, []) x: str }")
@@ -638,7 +648,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     }
 
     "parse @normalize coexisting with an = fn property" in {
-      val p = onlyProperty("data D { @normalize(fn[t: T](self: Self) { self }) area: f32 = fn(self: Self) { self.width } }")
+      val p = onlyProperty("data D { @normalize(fn[t: T](self) { self }) area: f32 = fn(self) { self.width } }")
       assert(p.field.normalize.isDefined)
       val fn = unwrapFn(p.field.default)
       assert(fn.params.size == 1)
