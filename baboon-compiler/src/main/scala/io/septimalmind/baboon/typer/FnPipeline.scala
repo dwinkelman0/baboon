@@ -115,7 +115,10 @@ object FnPipeline {
     * Rewritten here (P2) so the standalone pipeline and the translator share
     * one home for `Self`; the translator must not pre-rewrite. A capture path
     * on `= fn` (computed) therefore situates the container subtree, while a
-    * normalize/default `self: Self` types as the field value.
+    * normalize/default `self` types as the field value.
+    * Bare `self` (no type annotation) is normalized by the parser to the same
+    * `Self` type as the legacy `self: Self` alias, so both forms flow through
+    * this rewrite and `checkComputedSelf` identically.
     */
   private def selfFor(role: FnRole, owner: String, expected: RawTypeRef, raw: RawTypeRef): RawTypeRef = raw match {
     case RawTypeRef.Simple(n, pre) if n.name == "Self" =>
@@ -155,7 +158,7 @@ object FnPipeline {
 
   /** Capture ancestry (general `fn` placement rule): a capture root `C` must
     * be a strict ancestor of the decorated node `N` (`owner.field`).
-    * Self-capture (`C == N`) is rejected as redundant: `self: Self` already
+    * Self-capture (`C == N`) is rejected as redundant: `self` already
     * covers it, so the capture root must strictly dominate the owner type,
     * reachable from `C` by walking
     * DTO/contract fields and ADT members/fields, peeling
@@ -244,7 +247,7 @@ object FnPipeline {
         // container subtree, so ancestry is vacuous for them.
         if (roots.isEmpty) FnTypes.ok(())
         else if (roots.contains(in.owner))
-          FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is redundant: self is already `self: Self`; capture is for ancestors only")
+          FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is redundant: self is already `self`; capture is for ancestors only")
         else {
           val parents = parentMapOf(schema)
           // Root rule: a root node may be instantiated without a parent, so

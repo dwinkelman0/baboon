@@ -270,7 +270,7 @@ final class FnPipelineTest extends AnyWordSpec {
 
   "P7 Self roles" should {
 
-    "resolve computed self: Self to the owner container with sibling access" in {
+    "resolve computed self to the owner container with sibling access" in {
       val fn = RawFn(Nil, List(RawFnParam("self", rt("Self"))), rawBody(Nil, BodyExpr.BinOp("+", path("self", fld("count")), path("self", fld("total")))))
       val p = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn)))
       val (_, typed, _) = p.fns.head
@@ -278,7 +278,7 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(typed.body.tpe == i32)
     }
 
-    "resolve normalize self: Self to the field value type" in {
+    "resolve normalize self to the field value type" in {
       val fn = RawFn(Nil, List(RawFnParam("self", rt("Self"))), rawBody(Nil, BodyExpr.Call(path("self"), "trim", Nil)))
       val p = mustAssemble(List(in("Child", "data", FnRole.Normalize, fn, expected = "str")))
       val (_, typed, _) = p.fns.head
@@ -286,7 +286,7 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(typed.body.tpe == str)
     }
 
-    "resolve default self: Self to the field value type" in {
+    "resolve default self to the field value type" in {
       val fn = RawFn(Nil, List(RawFnParam("self", rt("Self"))), rawBody(Nil, path("self")))
       val p = mustAssemble(List(in("Child", "count", FnRole.Default, fn)))
       val (_, typed, _) = p.fns.head

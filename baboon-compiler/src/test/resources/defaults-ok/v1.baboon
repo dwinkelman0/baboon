@@ -34,6 +34,6 @@ root data Defaults {
   @normalize(fn[v: str]() { let t: str = v.trim(); if (t == "") { "n/a" } else { t } }) normField: str
   @migrate(fn[old: str]() { old.trim() }, []) migField: str
   shouty: str = fn() { "hey".uppercase() }
-  curve: f32 = fn(self: Self, t: f32) { self.base + t }
+  curve: f32 = fn(self, t: f32) { self.base + t }
   base: f32
 }

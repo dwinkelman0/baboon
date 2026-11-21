@@ -234,7 +234,12 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   private def param[$: P]: P[RawFnParam] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    (idt.symbol ~ ":" ~/ typeRef).map { case (name, tpe) => RawFnParam(name, tpe) }
+    // Bare `self` (no type) means the same role-dependent type as the legacy
+    // `self: Self` alias (normalized here so the typer sees identical input).
+    // Any other bare name is rejected: the typed alternative fails (no `:`)
+    // and the bare alternative only matches `self`.
+    (idt.symbol ~ ":" ~/ typeRef).map { case (name, tpe) => RawFnParam(name, tpe) } |
+      idt.symbol.filter(_ == "self").map { name => RawFnParam(name, RawTypeRef.Simple(RawTypeName("Self"), Nil)) }
   }
 
   private def fnBody[$: P]: P[RawBody] = {
@@ -464,14 +469,14 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
     *
     * Container-self clarification (no grammar change here — roles are carried
     * by the produced member):
-    *   - a trailing `= fn(self: Self) { ... }` parses into the returned `RawFn`
-    *     and becomes an `FnProperty` (role `Computed`): `self: Self` is the
+    *   - a trailing `= fn(self) { ... }` parses into the returned `RawFn`
+    *     and becomes an `FnProperty` (role `Computed`): `self` is the
     *     enclosing container instance (the owner DTO), and capture paths on it
     *     situate the container subtree (transparent through `opt`/`set`/`map`,
     *     `opt.Some` implied);
-    *   - `@normalize(fn(self: Self) { ... })` / `@default(fn(self: Self) { ... })`
+    *   - `@normalize(fn(self) { ... })` / `@default(fn(self) { ... })`
     *     keep the fn on the `RawField` (roles `Normalize` / `Default`):
-    *     `self: Self` there is the field's own value (the declared field type).
+    *     `self` there is the field's own value (the declared field type).
     * P2 resolves `Self` per role accordingly.
     */
   private def fieldDefCore[$: P]: P[(RawField, Option[RawFn])] = {

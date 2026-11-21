@@ -17,7 +17,7 @@ object RawDtoMember {
   /** Phase A context-function read-only property carrier.
     *
     * Produced by the parser when a field declaration uses an `fn` initializer
-    * (`area: f32 = fn(self: Self) { ... }`). The typer intentionally rejects
+    * (`area: f32 = fn(self) { ... }`). The typer intentionally rejects
     * these with `VerificationIssue.FnNotSupported` until function bodies are
     * lowered to a backend.
     */
