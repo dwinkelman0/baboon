@@ -186,7 +186,7 @@ final class FnBodyTypingTest extends AnyWordSpec {
         case Right((typed, binds)) =>
           assert(typed.endpoint == uref("Item"))
           assert(typed.path.last == TypedCaptureStep.KeyStep("k", str))
-          assert(binds.toMap.get("k").contains(ScopeEntry.LetBinding(str)))
+          assert(binds.toMap.get("k").contains(ScopeEntry.KeyVar(str)))
         case Left(err) => fail(s"expected success: ${err.mkString("; ")}")
       }
     }

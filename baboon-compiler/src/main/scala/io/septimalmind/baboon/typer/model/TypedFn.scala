@@ -54,6 +54,10 @@ object ScopeEntry {
   final case class Param(tpe: TypeRef)       extends ScopeEntry
   final case class LetBinding(tpe: TypeRef)  extends ScopeEntry
   final case class StarChain(tpe: TypeRef)   extends ScopeEntry
+  /** Read-only key variable bound by a capture `[$k]` / star-subpath key
+    * step. Readable like a let, but never an assignment target (node-level
+    * `@capture` shares these across every fn of the node). */
+  final case class KeyVar(tpe: TypeRef)      extends ScopeEntry
 }
 
 /** Per-fn scope table: `name -> entry`. */

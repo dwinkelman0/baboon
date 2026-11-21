@@ -189,6 +189,11 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
       .map { case (captures, params, body) => RawFn(captures.toList, params.toList, body) }
   }
 
+  def captureAnnotation[$: P]: P[RawCapture] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("@" ~ kw.kw("capture") ~ "(" ~/ capture ~ ")")
+  }
+
   private def capture[$: P]: P[RawCapture] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
     (idt.symbol ~ ":" ~/ rootType ~ captureStep.rep).map {
@@ -575,16 +580,16 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   def dtoEnclosed[$: P]: P[RawDto] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.data, templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(dto))).map {
-      case (meta, name, (tps, derived, special, members)) =>
-        RawDto(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil), special)
+    P(captureAnnotation.? ~ meta.member(kw.data, templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(dto))).map {
+      case (cap, (meta, name, (tps, derived, special, members))) =>
+        RawDto(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil), special, cap)
     }
   }
 
   def identifierEnclosed[$: P]: P[RawIdentifier] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.identifier, templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(dto))).map {
-      case (meta, name, (tps, derived, special, members)) => RawIdentifier(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil), special)
+    P(captureAnnotation.? ~ meta.member(kw.identifier, templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(dto))).map {
+      case (cap, (meta, name, (tps, derived, special, members))) => RawIdentifier(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil), special, cap)
     }
   }
 

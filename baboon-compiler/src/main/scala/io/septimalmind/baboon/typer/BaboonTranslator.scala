@@ -348,6 +348,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     label: String,
     siblings: Seq[Field] = Nil,
     ownerIsRoot: Boolean = false,
+    nodeCapture: Option[RawCapture] = None,
   ): F[NEList[BaboonIssue], model.TypedFn] = {
     val fn = rawFn
     val schema = fnSchemaForAll(owner, stubField, siblings)
@@ -365,7 +366,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
         val issues = es.flatMap(e => BaboonIssue.of(VerificationIssue.FnNotSupported(owner, s"$label fn: $e", meta)).toList)
         F.fail(NEList.unsafeFrom(issues))
       case Right(sources) =>
-        val input = FnPipeline.FnSiteInputs(fn, owner.name.name, fieldName, role, expectedRaw, sources, schema, ownerIsRoot)
+        val input = FnPipeline.FnSiteInputs(fn, owner.name.name, fieldName, role, expectedRaw, sources, schema, ownerIsRoot, nodeCapture)
         FnPipeline.assemble(List(input)) match {
           case Right(prog) =>
             prog.fns.headOption match {

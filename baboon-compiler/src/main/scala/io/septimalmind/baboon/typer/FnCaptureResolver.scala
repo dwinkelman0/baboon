@@ -96,7 +96,7 @@ object FnCaptureResolver {
           } yield Acc(
             TypedCaptureStep.KeyStep(varName, kt) :: acc.steps,
             et,
-            (varName -> (ScopeEntry.LetBinding(kt): ScopeEntry)) :: acc.bindings,
+            (varName -> (ScopeEntry.KeyVar(kt): ScopeEntry)) :: acc.bindings,
           ))
         case other =>
           fail(s"capture `$capName`: key segment `[$varName]` on non-collection $other")
@@ -203,7 +203,7 @@ object FnCaptureResolver {
                 } yield Acc(
                   TypedCaptureStep.KeyStep(varName, kt) :: acc.steps,
                   et,
-                  (varName -> (ScopeEntry.LetBinding(kt): ScopeEntry)) :: acc.bindings,
+                  (varName -> (ScopeEntry.KeyVar(kt): ScopeEntry)) :: acc.bindings,
                 ))
               case other =>
                 Left(List(s"capture `$capName`: key segment `[$varName]` on non-collection $other"))

@@ -394,7 +394,8 @@ object FnBodyTyper {
   }
 
   /** Lvalue paths: same resolution as value paths, but a bare root must be
-    * a local (`let` / binder), never a capture root, param or star chain.
+    * a local (`let` / binder), never a capture root, capture key var, param
+    * or star chain.
     */
   private def typeLvalue(target: BodyExpr, scope: ScopeTable, schema: FnSchema): Res[TypedExpr] =
     target match {
@@ -402,6 +403,7 @@ object FnBodyTyper {
         scope.get(root).toRight(List(s"unknown assign target: $root")).flatMap {
           case ScopeEntry.LetBinding(t) => ok(TypedExpr.Path(root, Nil, t): TypedExpr)
           case ScopeEntry.CaptureRoot(_) => fail(s"cannot assign to capture root: $root")
+          case ScopeEntry.KeyVar(_) => fail(s"cannot assign to capture key var: $root")
           case ScopeEntry.Param(_)       => fail(s"cannot assign to param: $root")
           case ScopeEntry.StarChain(_)   => fail(s"cannot assign to star chain: $root")
         }

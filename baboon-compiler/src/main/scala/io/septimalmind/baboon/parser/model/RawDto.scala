@@ -14,6 +14,7 @@ sealed trait RawDtoid {
   def meta: RawNodeMeta
   def special: Option[RawSpecial]
   def isSpecial: Boolean = special.isDefined
+  def capture: Option[RawCapture]
 }
 
 /** Marker for `#Assertion` / `#Provenance` special type declarations.
@@ -35,15 +36,15 @@ object RawSpecial {
     case _            => None
   }
 }
-case class RawDto(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None)
+case class RawDto(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None, capture: Option[RawCapture] = None)
   extends RawDefn
   with RawDtoid
 
-case class RawIdentifier(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None)
+case class RawIdentifier(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None, capture: Option[RawCapture] = None)
   extends RawDefn
   with RawDtoid
 
-case class RawContract(name: RawTypeName, members: Seq[RawDtoMember], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None) extends RawDefn with RawDtoid
+case class RawContract(name: RawTypeName, members: Seq[RawDtoMember], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None, capture: Option[RawCapture] = None) extends RawDefn with RawDtoid
 
 case class RawEnum(name: RawTypeName, members: Seq[RawEnumMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, special: Option[RawSpecial] = None) extends RawDefn
 

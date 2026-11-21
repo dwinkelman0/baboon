@@ -1015,4 +1015,28 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     }
 
   }
+
+  "node-level @capture" should {
+
+    "parse @capture(s: Shop.basket.items[$k]) data Child" in {
+      val dto = parseDto("@capture(s: Shop.basket.items[$k]) data Child { count: i32 }")
+      val cap = dto.capture.getOrElse(fail("expected node @capture"))
+      assert(cap.name == "s")
+      assertSimpleType(cap.rootType, "Shop")
+      assert(
+        cap.path == List(
+          RawCaptureStep.Single(RawLocatorSeg.Field("basket")),
+          RawCaptureStep.Single(RawLocatorSeg.Field("items")),
+          RawCaptureStep.Single(RawLocatorSeg.Key("k")),
+        ),
+        s"unexpected node capture path: ${cap.path}",
+      )
+    }
+
+    "parse a node without @capture as capture-less" in {
+      val dto = parseDto("data Child { count: i32 }")
+      assert(dto.capture.isEmpty, s"expected no node capture, got ${dto.capture}")
+    }
+
+  }
 }
