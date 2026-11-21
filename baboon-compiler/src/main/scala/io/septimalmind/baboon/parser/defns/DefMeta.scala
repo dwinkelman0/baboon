@@ -81,4 +81,18 @@ class DefMeta(context: ParserContext) {
     }
   }
 
+  /** Special-type marker: an optional `("#" ~ symbol)` between `derived`
+    * and the enclosed body. Only exactly `Assertion` / `Provenance` are
+    * accepted — any other `#Foo` fails the parse (filter rejection).
+    * `Identifiers.symbol` carries no `#` and `Basic.isOpChar`'s `#` is
+    * unused here; this explicit parser owns the `#` token.
+    */
+  def specialMarker[$: P]: P[RawSpecial] = {
+    import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    P("#" ~ idt.symbol).filter(s => s == "Assertion" || s == "Provenance").map {
+      case "Assertion" => RawSpecial.Assertion
+      case _           => RawSpecial.Provenance
+    }
+  }
+
 }

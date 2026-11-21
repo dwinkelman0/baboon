@@ -1860,6 +1860,7 @@ object BaboonJS {
       case NamSeqeNotFound(_, _, meta)                          => Some(meta.pos)
       case CircularAlias(_, meta)                               => Some(meta.pos)
       case DuplicatedTypes(_, meta)                             => Some(meta.pos)
+      case DuplicateSpecial(_, _, metas)                        => metas.headOption.map(_.pos)
       case WrongParent(_, _, meta)                              => Some(meta.pos)
       case MissingContractFields(_, _, meta)                    => Some(meta.pos)
       case DuplicatedAdtBranches(_, _, _, meta)                 => Some(meta.pos)

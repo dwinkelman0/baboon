@@ -104,13 +104,13 @@ class DefAdt(context: ParserContext, meta: DefMeta, defDto: DefDto, defContract:
 
   def adtEnclosed[$: P]: P[RawAdt] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.adt, defDto.templateHead.? ~ meta.derived ~ struct.enclosed(adt))).map {
-      case (meta, name, (tps, derived, members)) =>
+    P(meta.member(kw.adt, defDto.templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(adt))).map {
+      case (meta, name, (tps, derived, special, members)) =>
         val typeMembers     = members.collect { case Right(m) => m }
         val contractMembers = members.collect { case Left(Left(m)) => m }
         val extractions     = members.collect { case Left(Right(e)) => e }
 
-        model.RawAdt(RawTypeName(name), typeMembers, contractMembers, extractions, derived, meta, tps.getOrElse(Nil))
+        model.RawAdt(RawTypeName(name), typeMembers, contractMembers, extractions, derived, meta, tps.getOrElse(Nil), special)
     }
   }
 

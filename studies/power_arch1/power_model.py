@@ -1,7 +1,14 @@
-"""Hand-lowered mirror of studies/power_arch1/models/latest/soc.baboon (model power.arch1 v1.0.1).
+"""Hand-lowered mirror of studies/power_arch1/models/latest/soc.baboon (model power.arch1 v2.0.0).
 
 Table lookups are table-owned methods (LeakTable.lookup, MemTable.lookup,
 VfTable.contains/fmaxAt); SoC delegates to them. Numerics unchanged from v1.0.0.
+
+v2.0.0: typed violations + provenance. The schema's single per-package
+`#Assertion` ADT (`PowerViolation`) is mirrored below; an assert message may
+be `str` or that type, and SoC.ptotal's temp assert carries `self.viol` (a
+required SoC input field). The single per-package `#Provenance` DTO
+(`RunProvenance`, all fields defaulted) is mirrored as an inert record.
+Both specials are implicitly root in-schema; numerics are unchanged.
 
 Faithful manual lowering of every computed fn-property, used two ways:
   1. Differential oracle: cross-checked against baboon `:python` codegen
@@ -114,6 +121,45 @@ def _lerp(table_x, table_y, x):
     return py + t * (qy - py)
 
 
+# --- v2.0.0 specials --------------------------------------------------------
+
+# Mirror of the single per-package `#Assertion` ADT: an assert message may be
+# a `str` (unchanged default) or one of these variant payloads. Assert-only,
+# never propagated as values.
+@dataclass(frozen=True)
+class PowerViolation:
+    """Base of the #Assertion ADT; variants carry the offending readings."""
+
+
+@dataclass(frozen=True)
+class OverVoltage(PowerViolation):
+    voltage: float
+    fmax: float
+
+
+@dataclass(frozen=True)
+class TempExceed(PowerViolation):
+    temp: float
+    tmax: float
+
+
+@dataclass(frozen=True)
+class PcapExceed(PowerViolation):
+    ptotal: float
+    pcap: float
+
+
+# Mirror of the single per-package `#Provenance` DTO: every field defaulted
+# in-schema so `RunProvenance()` builds the empty record; inert here (no fn
+# reads it), kept so the oracle mirrors models/latest 1:1.
+@dataclass(frozen=True)
+class RunProvenance:
+    model: str = "power.arch1"
+    modelVersion: str = "2.0.0"
+    dataVersion: str = "vf-v1+leak-v1+meff-v1"
+    tool: str = "baboon"
+
+
 @dataclass
 class SoC:
     op: OpPoint
@@ -130,6 +176,9 @@ class SoC:
     base_ceff: float = 0.5e-9
     pcap: float = 60.0
     tmax: float = 360.0
+    # v2.0.0: typed assert-message payload (required in-schema; the oracle
+    # defaults to None so pre-v2 callers keep working).
+    viol: PowerViolation = None
 
     # 1. Ceff = base_ceff(cores) x ceff_scale
     @property
@@ -184,10 +233,11 @@ class SoC:
         assert 0.0 < self.tmem, "tmem must be positive"
         return min(self.tcomp, self.tmem)
 
-    # 8. Ptotal + envelope asserts (table-owned V-f lookup)
+    # 8. Ptotal + envelope asserts (table-owned V-f lookup). The temp assert
+    # carries the typed #Assertion payload (self.viol) as its message.
     @property
     def ptotal(self):
-        assert self.op.temp <= self.tmax, "temp exceeds tmax"
+        assert self.op.temp <= self.tmax, self.viol
         v, f = self.op.voltage, self.op.freq
         assert self.vf_table.contains(v), "voltage not in V-f table"
         fmax = self.vf_table.fmax_at(v)
@@ -227,7 +277,7 @@ class SoC:
         }
 
 
-MODEL_VERSION = "power.arch1@1.0.1"
+MODEL_VERSION = "power.arch1@2.0.0"
 DATA_VERSIONS = {"vf": "vf-v1", "leak": "leak-nominal-v1", "meff": "meff-v1"}
 
 VF_TABLE = (
@@ -268,4 +318,5 @@ def golden_inputs():
         base_ceff=0.5e-9,
         pcap=60.0,
         tmax=360.0,
+        viol=TempExceed(temp=340.0, tmax=360.0),
     )

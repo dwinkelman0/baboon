@@ -479,6 +479,9 @@ object BaboonTyper {
         synthResult <- synthesizeExtractions(pkg, instantiatedMembers, templateRegistry)
         (membersWithExtractions, synthesizedExtractions) = synthResult
 
+        // #Assertion / #Provenance: at most one special of each kind per package.
+        _ <- checkNoDuplicateSpecials(pkg, membersWithExtractions, meta)
+
         builder = new ScopeBuilder[F]()
         // Build an initial scope tree so we can resolve `+ X` / `- X` / `^ X` refs in ADT bodies.
         // The PR-63 typer-early pass uses this initial tree to rewrite each `RawAdt`'s member list,
@@ -499,6 +502,24 @@ object BaboonTyper {
         renames  <- computeRenames(pkg, flattened)
         ordered  <- order(pkg, flattened, meta)
 
+        // #Assertion/#Provenance: convert specials before everything else. ADTs have no
+        // shell form and the hard-dep toposort is arbitrary for field-ref-only edges, so
+        // without this an fn body (e.g. an assert msg of the #Assertion type) could be
+        // typed before the special entered `defined` and fail the FnSchema lookup.
+        // Stable partition — a no-op for models without specials.
+        convertOrder = {
+          val (specials, rest) = ordered.partition {
+            d =>
+              d.defn.defn match {
+                case x: RawDtoid => x.isSpecial
+                case x: RawEnum  => x.special.isDefined
+                case x: RawAdt   => x.special.isDefined
+                case _           => false
+              }
+          }
+          specials ++ rest
+        }
+
         // Order-independent fn assembly: hard-dep toposort is arbitrary for types
         // related only through field refs or fn bodies, so a DTO translated early
         // would otherwise fail to resolve not-yet-translated siblings ("unknown
@@ -507,10 +528,10 @@ object BaboonTyper {
         // under each step's accumulated translations (`shells ++ acc`, so full
         // translations always win). Shells only feed fn pipeline resolution;
         // they never reach `out`, backends, or diagnostics.
-        shells   <- F.flatTraverseAccumErrors(ordered)(d => translator(pkg, d, Map.empty[TypeId, DomainMember]).shellMember())
+        shells   <- F.flatTraverseAccumErrors(convertOrder)(d => translator(pkg, d, Map.empty[TypeId, DomainMember]).shellMember())
         shellMap: Map[TypeId, DomainMember] = shells.map(m => (m.id: TypeId, m: DomainMember)).toMap
 
-        out <- F.foldLeft(ordered)(Map.empty[TypeId, DomainMember]) {
+        out <- F.foldLeft(convertOrder)(Map.empty[TypeId, DomainMember]) {
           case (acc, defn) =>
             for {
               next  <- translator(pkg, defn, shellMap ++ acc).translate()
@@ -565,6 +586,38 @@ object BaboonTyper {
       * feed the `ExtractionEmpty` diagnostic.
       */
     private case class SynthesizedExtraction(id: TypeId.User, name: String, hostName: String, meta: RawNodeMeta)
+
+    /** `#Assertion` / `#Provenance` uniqueness: at most one special of each
+      * kind per package. Specials are implicitly root (handled in
+      * `BaboonTranslator` via `root || special.isDefined`), so this gate is
+      * the only additional typer rule. Every occurrence location is carried
+      * for the diagnostic.
+      */
+    private def checkNoDuplicateSpecials(
+      pkg: Pkg,
+      members: Seq[RawTLDef],
+      meta: RawNodeMeta,
+    ): F[NEList[BaboonIssue], Unit] = {
+      val specials = members.flatMap { m =>
+        val found: Option[(String, RawNodeMeta)] = m.value match {
+          case d: RawDtoid => d.special.map(sp => (sp.toString, d.meta))
+          case e: RawEnum  => e.special.map(sp => (sp.toString, e.meta))
+          case a: RawAdt   => a.special.map(sp => (sp.toString, a.meta))
+          case _           => None
+        }
+        found
+      }
+      val dupes = specials.groupBy(_._1).view.filter(_._2.size > 1).toMap
+      if (dupes.isEmpty) {
+        F.unit
+      } else {
+        val issues = dupes.toList.flatMap {
+          case (kind, occ) =>
+            BaboonIssue.of(TyperIssue.DuplicateSpecial(kind, pkg, occ.map(_._2).toList)).toList
+        }
+        F.fail(NEList.unsafeFrom(issues))
+      }
+    }
 
     /** One pending extraction collected from a templated host, before contract synthesis. */
     private case class PendingExtraction(
