@@ -55,8 +55,8 @@ class DefEnum(@unused context: ParserContext, meta: DefMeta) {
 
   def enumEnclosed[$: P]: P[RawEnum] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.choice, meta.derived ~ struct.enclosed(defEnum(sepEnum)))).map {
-      case (meta, name, (derived, members)) => RawEnum(RawTypeName(name), members, derived, meta)
+    P(meta.member(kw.choice, meta.derived ~ meta.specialMarker.? ~ struct.enclosed(defEnum(sepEnum)))).map {
+      case (meta, name, (derived, special, members)) => RawEnum(RawTypeName(name), members, derived, meta, special)
     }
   }
 }

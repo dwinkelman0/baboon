@@ -12,18 +12,40 @@ sealed trait RawDtoid {
   def name: RawTypeName
   def members: Seq[RawDtoMember]
   def meta: RawNodeMeta
+  def special: Option[RawSpecial]
+  def isSpecial: Boolean = special.isDefined
 }
-case class RawDto(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName])
+
+/** Marker for `#Assertion` / `#Provenance` special type declarations.
+  * Parsed as an optional `("#" ~ symbol)` between `derived` and the enclosed
+  * body; any other `#Foo` is a parse error (enforced by filter in DefMeta).
+  */
+sealed trait RawSpecial
+object RawSpecial {
+  case object Assertion extends RawSpecial {
+    override def toString: String = "Assertion"
+  }
+  case object Provenance extends RawSpecial {
+    override def toString: String = "Provenance"
+  }
+
+  def fromString(s: String): Option[RawSpecial] = s match {
+    case "Assertion"  => Some(Assertion)
+    case "Provenance" => Some(Provenance)
+    case _            => None
+  }
+}
+case class RawDto(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None)
   extends RawDefn
   with RawDtoid
 
-case class RawIdentifier(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName])
+case class RawIdentifier(name: RawTypeName, members: Seq[RawDtoMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None)
   extends RawDefn
   with RawDtoid
 
-case class RawContract(name: RawTypeName, members: Seq[RawDtoMember], meta: RawNodeMeta, typeParams: List[RawTypeName]) extends RawDefn with RawDtoid
+case class RawContract(name: RawTypeName, members: Seq[RawDtoMember], meta: RawNodeMeta, typeParams: List[RawTypeName], special: Option[RawSpecial] = None) extends RawDefn with RawDtoid
 
-case class RawEnum(name: RawTypeName, members: Seq[RawEnumMember], derived: Set[RawMemberMeta], meta: RawNodeMeta) extends RawDefn
+case class RawEnum(name: RawTypeName, members: Seq[RawEnumMember], derived: Set[RawMemberMeta], meta: RawNodeMeta, special: Option[RawSpecial] = None) extends RawDefn
 
 case class RawAdt(
   name: RawTypeName,
@@ -33,6 +55,7 @@ case class RawAdt(
   derived: Set[RawMemberMeta],
   meta: RawNodeMeta,
   typeParams: List[RawTypeName],
+  special: Option[RawSpecial] = None,
 ) extends RawDefn
 
 case class RawForeign(name: RawTypeName, defns: List[RawForeignEntry], derived: Set[RawMemberMeta], meta: RawNodeMeta) extends RawDefn

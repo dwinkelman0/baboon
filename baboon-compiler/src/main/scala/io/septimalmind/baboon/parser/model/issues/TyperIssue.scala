@@ -122,6 +122,12 @@ object TyperIssue {
 
   case class DuplicatedTypes(dupes: Set[TypeId], meta: RawNodeMeta) extends TyperIssue
 
+  /** Two or more `#Assertion` (or two or more `#Provenance`) specials in
+    * one package. At most one of each may exist per package; every
+    * occurrence location is carried for the diagnostic.
+    */
+  case class DuplicateSpecial(kind: String, pkg: Pkg, metas: List[RawNodeMeta]) extends TyperIssue
+
   case class CircularAlias(name: RawTypeName, meta: RawNodeMeta) extends TyperIssue
 
   case class WrongParent(id: TypeId.User, id1: TypeId, meta: RawNodeMeta) extends TyperIssue
@@ -680,6 +686,18 @@ object TyperIssue {
          |Duplicate types have been found:${issue.dupes
           .map(_.name.name)
           .niceList()}
+         |""".stripMargin
+    }
+
+  implicit val duplicateSpecialPrinter: IssuePrinter[DuplicateSpecial] =
+    (issue: DuplicateSpecial) => {
+      val locations = issue.metas.map(extractLocation).mkString("\n")
+      s"""Duplicate #${
+          issue.kind
+        } special in package ${issue.pkg.toString}: at most one #${
+          issue.kind
+        } is allowed per package
+         |$locations
          |""".stripMargin
     }
 

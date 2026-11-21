@@ -1,5 +1,6 @@
 package io.septimalmind.baboon.typer.model
 
+import io.septimalmind.baboon.parser.model.RawSpecial
 import izumi.fundamentals.collections.nonempty.NEList
 
 case class UnmodifiedSince(typeId: TypeId, in: Version, sameIn: NEList[Version]) {
@@ -36,15 +37,33 @@ sealed trait Typedef {
 }
 
 object Typedef {
-  sealed trait User extends Typedef {
-    def id: TypeId.User
+  /** Marker for `#Assertion` / `#Provenance` special type declarations.
+    * Plumbs the parser-side `RawSpecial` into the typed model; defaults to
+    * `None` like `isIdentifier` so all existing construction sites stay
+    * source-compatible.
+    */
+  sealed trait SpecialKind
+  object SpecialKind {
+    case object Assertion extends SpecialKind
+    case object Provenance extends SpecialKind
+
+    def fromRaw(s: RawSpecial): SpecialKind = s match {
+      case RawSpecial.Assertion  => Assertion
+      case RawSpecial.Provenance => Provenance
+    }
   }
 
-  case class Dto(id: TypeId.User, fields: List[Field], contracts: List[TypeId.User], isIdentifier: Boolean = false) extends User
+  sealed trait User extends Typedef {
+    def id: TypeId.User
+    def special: Option[SpecialKind]
+    def isSpecial: Boolean = special.isDefined
+  }
 
-  case class Enum(id: TypeId.User, members: NEList[EnumMember]) extends User
+  case class Dto(id: TypeId.User, fields: List[Field], contracts: List[TypeId.User], isIdentifier: Boolean = false, special: Option[SpecialKind] = None) extends User
 
-  case class Adt(id: TypeId.User, members: NEList[TypeId.User], contracts: List[TypeId.User], fields: List[Field]) extends User
+  case class Enum(id: TypeId.User, members: NEList[EnumMember], special: Option[SpecialKind] = None) extends User
+
+  case class Adt(id: TypeId.User, members: NEList[TypeId.User], contracts: List[TypeId.User], fields: List[Field], special: Option[SpecialKind] = None) extends User
 
   case class ForeignEntryAttr(name: String, value: String)
   case class ForeignEntryAttrs(attrs: List[ForeignEntryAttr])
@@ -57,7 +76,10 @@ object Typedef {
 
   case class ForeignEntry(lang: BaboonLang, mapping: ForeignMapping)
 
-  case class Foreign(id: TypeId.User, bindings: Map[BaboonLang, ForeignEntry], runtimeMapping: Option[TypeRef]) extends User
+  case class Foreign(id: TypeId.User, bindings: Map[BaboonLang, ForeignEntry], runtimeMapping: Option[TypeRef]) extends User {
+    // foreign decls can never carry a `#Assertion` / `#Provenance` marker
+    def special: Option[SpecialKind] = None
+  }
 
   sealed trait NonDataTypedef {
     this: Typedef =>
@@ -66,9 +88,15 @@ object Typedef {
   case class MethodName(name: String) extends AnyVal
   case class MethodDef(name: MethodName, sig: TypeRef, out: Option[TypeRef], err: Option[TypeRef], docs: Docs = Docs.empty)
 
-  case class Service(id: TypeId.User, methods: List[MethodDef]) extends User with NonDataTypedef
+  case class Service(id: TypeId.User, methods: List[MethodDef]) extends User with NonDataTypedef {
+    // services can never carry a `#Assertion` / `#Provenance` marker
+    def special: Option[SpecialKind] = None
+  }
 
-  case class Contract(id: TypeId.User, fields: List[Field], contracts: List[TypeId.User]) extends User with NonDataTypedef
+  case class Contract(id: TypeId.User, fields: List[Field], contracts: List[TypeId.User]) extends User with NonDataTypedef {
+    // contracts can never carry a `#Assertion` / `#Provenance` marker
+    def special: Option[SpecialKind] = None
+  }
 
   object Adt {
     implicit class AdtSyntax(val adt: Adt) extends AnyVal {

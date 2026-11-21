@@ -103,12 +103,29 @@ object FnBodyTyper {
           case None => ok(())
           case Some(mm) =>
             if (conformsLit(mm, scalar("str"))) ok(())
-            else fail[Unit](s"assert message must be str, got ${mm.tpe}")
+            else if (isAssertionMsg(mm, schema)) ok(())
+            else fail[Unit](s"assert message must be str or #Assertion, got ${mm.tpe}")
         }
       } yield {
         val typed = TypedAssert(c, m.headOption, collectAssertVars(c), None)
         (TypedStmt.Assert(typed), scope)
       }
+  }
+
+  /** Assert-message rule: `str` (default, unchanged when no special is
+    * present) or a value whose type is a `#Assertion` special typedef
+    * (Dto/Enum/Adt). Looks the message type up in the fn schema by simple
+    * name — user types surface as `TypeRef.Scalar(TypeId.User)`.
+    */
+  private def isAssertionMsg(mm: TypedExpr, schema: FnSchema): Boolean = mm.tpe match {
+    case TypeRef.Scalar(id: TypeId.User) =>
+      schema.lookup(id.name.name) match {
+        case Some(d: Typedef.Dto) => d.special.contains(Typedef.SpecialKind.Assertion)
+        case Some(e: Typedef.Enum) => e.special.contains(Typedef.SpecialKind.Assertion)
+        case Some(a: Typedef.Adt) => a.special.contains(Typedef.SpecialKind.Assertion)
+        case _                    => false
+      }
+    case _ => false
   }
 
   /** Distinct `Path`s involved in an assert condition, in first-occurrence

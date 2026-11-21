@@ -81,13 +81,13 @@ class BaboonTranslator[F[+_, +_]: Error2](
       id <- scopeSupport.resolveUserTypeId(rawDefn.defn.name, defn, pkg, rawDefn.defn.meta)
       out <- rawDefn.defn match {
         case d: RawDto =>
-          shellDto(id, rawDefn.gcRoot, d, d.derived, d.meta) { case (i, fs, refs) => Typedef.Dto(i, fs, refs) }
+          shellDto(id, rawDefn.gcRoot || d.special.isDefined, d, d.derived, d.meta) { case (i, fs, refs) => Typedef.Dto(i, fs, refs, special = d.special.map(Typedef.SpecialKind.fromRaw)) }
         case d: RawIdentifier =>
-          shellDto(id, rawDefn.gcRoot, d, d.derived, d.meta) { case (i, fs, refs) => Typedef.Dto(i, fs, refs, isIdentifier = true) }
+          shellDto(id, rawDefn.gcRoot || d.special.isDefined, d, d.derived, d.meta) { case (i, fs, refs) => Typedef.Dto(i, fs, refs, isIdentifier = true, special = d.special.map(Typedef.SpecialKind.fromRaw)) }
         case d: RawContract =>
           shellDto(id, rawDefn.gcRoot, d, Set.empty[RawMemberMeta], d.meta) { case (i, fs, refs) => Typedef.Contract(i, fs, refs) }
         case e: RawEnum =>
-          converEnum(id, rawDefn.gcRoot, e).map(e => List(e))
+          converEnum(id, rawDefn.gcRoot || e.special.isDefined, e).map(e => List(e))
         case _ =>
           F.pure(List.empty)
       }
@@ -189,13 +189,13 @@ class BaboonTranslator[F[+_, +_]: Error2](
   ): F[NEList[BaboonIssue], List[DomainMember.User]] = {
     val root = defn.gcRoot
     defn.defn match {
-      case d: RawDto => convertDto(id, root, d) { case (id, finalFields, contractRefs) => Typedef.Dto(id, finalFields, contractRefs) }.map(d => List(d))
+      case d: RawDto => convertDto(id, root || d.special.isDefined, d) { case (id, finalFields, contractRefs) => Typedef.Dto(id, finalFields, contractRefs, special = d.special.map(Typedef.SpecialKind.fromRaw)) }.map(d => List(d))
       case d: RawIdentifier =>
-        convertDto(id, root, d) { case (id, finalFields, contractRefs) => Typedef.Dto(id, finalFields, contractRefs, isIdentifier = true) }.map(d => List(d))
-      case e: RawEnum     => converEnum(id, root, e).map(e => List(e))
-      case a: RawAdt      => convertAdt(id, root, a, thisScope).map(_.toList)
+        convertDto(id, root || d.special.isDefined, d) { case (id, finalFields, contractRefs) => Typedef.Dto(id, finalFields, contractRefs, isIdentifier = true, special = d.special.map(Typedef.SpecialKind.fromRaw)) }.map(d => List(d))
+      case e: RawEnum     => converEnum(id, root || e.special.isDefined, e).map(e => List(e))
+      case a: RawAdt      => convertAdt(id, root || a.special.isDefined, a, thisScope).map(_.toList)
       case f: RawForeign  => convertForeign(id, root, f).map(_.toList)
-      case c: RawContract => convertDto(id, root, c) { case (id, finalFields, contractRefs) => Typedef.Contract(id, finalFields, contractRefs) }.map(d => List(d))
+      case c: RawContract => convertDto(id, root || c.special.isDefined, c) { case (id, finalFields, contractRefs) => Typedef.Contract(id, finalFields, contractRefs) }.map(d => List(d))
 
       // namespace itself is not a typedef :3
       case _: RawNamespace => F.pure(List.empty)
@@ -275,7 +275,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
         NEList.from(converted)
       }
     } yield {
-      DomainMember.User(isRoot, Typedef.Enum(id, nel), choice.derived, choice.meta)
+      DomainMember.User(isRoot, Typedef.Enum(id, nel, special = choice.special.map(Typedef.SpecialKind.fromRaw)), choice.derived, choice.meta)
     }
   }
 
@@ -825,7 +825,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     } yield {
       NEList(
         DomainMember
-          .User(isRoot, Typedef.Adt(id, nel, contracts, fields), adt.derived, adt.meta)
+          .User(isRoot, Typedef.Adt(id, nel, contracts, fields, special = adt.special.map(Typedef.SpecialKind.fromRaw)), adt.derived, adt.meta)
       )
     }
   }

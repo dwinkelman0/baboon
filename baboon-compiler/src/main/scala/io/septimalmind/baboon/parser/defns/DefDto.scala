@@ -575,16 +575,16 @@ class DefDto(context: ParserContext, meta: DefMeta, docs: DefDocs) {
 
   def dtoEnclosed[$: P]: P[RawDto] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.data, templateHead.? ~ meta.derived ~ struct.enclosed(dto))).map {
-      case (meta, name, (tps, derived, members)) =>
-        RawDto(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil))
+    P(meta.member(kw.data, templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(dto))).map {
+      case (meta, name, (tps, derived, special, members)) =>
+        RawDto(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil), special)
     }
   }
 
   def identifierEnclosed[$: P]: P[RawIdentifier] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P(meta.member(kw.identifier, templateHead.? ~ meta.derived ~ struct.enclosed(dto))).map {
-      case (meta, name, (tps, derived, members)) => RawIdentifier(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil))
+    P(meta.member(kw.identifier, templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(dto))).map {
+      case (meta, name, (tps, derived, special, members)) => RawIdentifier(RawTypeName(name), members, derived, meta, tps.getOrElse(Nil), special)
     }
   }
 

@@ -20,11 +20,23 @@ from pygen.power.arch1.LeakTable import LeakTable
 from pygen.power.arch1.MemPoint import MemPoint
 from pygen.power.arch1.MemTable import MemTable
 from pygen.power.arch1.OpPoint import OpPoint
+from pygen.power.arch1.PowerViolation import OverVoltage, PcapExceed, PowerViolation, TempExceed
 from pygen.power.arch1.Scalars import Scalars
 from pygen.power.arch1.SoC import SoC
 from pygen.power.arch1.VfPoint import VfPoint
 from pygen.power.arch1.VfTable import VfTable
 from pygen.power.arch1.Workload import Workload
+
+
+def gen_viol(v):
+    """Map the oracle's #Assertion payload to its generated pydantic variant."""
+    if isinstance(v, pm.TempExceed):
+        return TempExceed(temp=v.temp, tmax=v.tmax)
+    if isinstance(v, pm.OverVoltage):
+        return OverVoltage(voltage=v.voltage, fmax=v.fmax)
+    if isinstance(v, pm.PcapExceed):
+        return PcapExceed(ptotal=v.ptotal, pcap=v.pcap)
+    raise TypeError(f"unsupported violation payload: {v!r}")
 
 
 def gen_soc(inp):
@@ -44,6 +56,7 @@ def gen_soc(inp):
         baseCeff=inp["base_ceff"],
         pcap=inp["pcap"],
         tmax=inp["tmax"],
+        viol=gen_viol(inp["viol"]),
     )
 
 
