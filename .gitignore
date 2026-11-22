@@ -2,6 +2,7 @@ result
 __pycache__
 .venv
 .direnv
+/bazel-*
 Cargo.lock
 baboon.json
 .idea

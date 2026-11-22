@@ -8,31 +8,32 @@ Baboon is a Domain Modeling Language (DML) compiler with schema evolution suppor
 
 ## Essential Commands
 
-This project uses [mudyla](https://github.com/7mind/mudyla) for build orchestration.
+This project uses Bazel for build orchestration (see `docs/bazel.md`).
 
-### Pre-commit / pre-push verification — `mdl` targets
+### Pre-commit / pre-push verification — Bazel targets
 
-**Run mdl with the appropriate target before every commit and push.** The same mdl actions are invoked by `.github/workflows/baboon-build.yml`, so what passes locally is what CI runs — single source of truth, defined in `.mdl/defs/{actions,tests}.md`.
+**Run Bazel before every commit and push.** The same Bazel commands are invoked by `.github/workflows/baboon-build.yml`, so what passes locally is what CI runs — single source of truth, defined in `BUILD.bazel` files.
 
 ```bash
-# Pre-commit (fast — build + cross-compile JVM/JS + full test matrix):
-mdl :build :test
+# Pre-commit (fast — build + focused test lanes):
+bazel build //...
+bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
 
 # Pre-push or after non-trivial refactor (everything CI runs):
-mdl :ci
+bazel build //...
+bazel test //...
 
-# Individual targets (see .mdl/defs/{actions,tests}.md for definitions):
-mdl :build                   # GraalVM native-image build (triggers sbt +compile, JVM + JS)
-mdl :test                    # full per-language test matrix
-mdl :smoke                   # native-image binary portability + round-trip
-mdl :test-editors            # tree-sitter editor grammar tests
-mdl :test-acceptance         # cross-language serialization acceptance tests
-mdl :test-service-acceptance # service-flavour RPC wiring round-trips
+# Individual targets:
+bazel build //...                       # full build
+bazel test //baboon-compiler/...        # compiler package (no JVM unit tests wired yet — next step)
+bazel test //test/py-stub/...           # Python stub tests
+bazel test //test/rs-stub/...           # Rust stub tests
+bazel build //baboon-compiler:baboon-native  # GraalVM native-image binary
 ```
 
 **Why this matters — historical failure modes these targets catch:**
 
-- `sbt baboonJVM/compile` is **NOT** a CI-equivalent check. It builds only the JVM project. CI runs `sbt +compile` (cross-build for JVM + Scala.js), which has stricter `-Wconf` settings that promote inexhaustive-match warnings to errors. PR-47 (M21) shipped with green local `sbt baboonJVM/compile` but failed CI on `BaboonJS.scala` (commit `2de517b` fixed it). `mdl :build :test` triggers `sbt +compile` — the same path CI uses.
+- `sbt baboonJVM/compile` is **NOT** a CI-equivalent check (and sbt is deprecated in favor of Bazel). CI runs `bazel build //... && bazel test //test/py-stub/... //test/rs-stub/...` — the same path you should run locally. Note the Bazel JVM build currently covers only `.jvm` platform sources (Scala.js sources under `.js/` are excluded); the historical PR-47 (M21) failure mode (JS-only exhaustive-match errors caught by sbt cross-build) has no Bazel equivalent yet — Scala.js support is future work.
 - When adding a new `TyperIssue` case class, **three** exhaustive-match sites must be updated: `lsp/features/DiagnosticsProvider.scala`, `lsp/state/WorkspaceState.scala`, and `.js/src/main/scala/io/septimalmind/baboon/BaboonJS.scala`. The `:build`/`:test` cross-build catches missed JS-side updates.
 - **M29 pattern (PR-29.7):** when a single PR introduces multiple new `TyperIssue` cases, **bundle them into one touch per exhaustive-match file** rather than updating each file once per case. PR-29.7 added three new cases (`TemplateNotInstantiated`, `NotATemplate`, `TemplateBodyCarriesDerived`) as 9 case arms total across 3 files — 3 file touches, not 9. Reduces the risk of CI red from a partially-applied exhaustive-match update mid-PR. PR-29.4 (`DuplicateTypeParam`), PR-29.5 (`TemplateArityMismatch`, `TemplateInstantiationInBody`), and PR-29.7 are the canonical M29 examples of the 3-site update pattern.
 
@@ -40,8 +41,8 @@ mdl :test-service-acceptance # service-flavour RPC wiring round-trips
 
 - CI passes `--github-actions` (CI-grouped log output) — humans don't set it.
 - macOS / Windows CI passes `--without-nix` (system tools, no nix shell).
-- **Kotlin lanes compile in-process:** `mdl :test` runs language test actions in parallel by default. Gradle builds with equal `kotlin.daemon.jvmargs` share one Kotlin compile daemon, so the parallel Kotlin lanes used to compile the generated corpus several times over in a single 2 GiB heap and failed with `OutOfMemoryError` whatever the machine's RAM (first documented in `docs/logs/20260428-2350-m16-closeout-log.md`, attributed there to small machines). `test/kt-stub{,-kmp}/gradle.properties` now set `kotlin.compiler.execution.strategy=in-process` with `org.gradle.jvmargs=-Xmx2g`, i.e. up to 2 GiB per concurrently running Kotlin lane. On a machine that cannot afford that, run `mdl --seq :build :test` to force serial execution (slower). CI uses default parallelism.
-- **sbt-git (jgit) cannot build inside a linked git worktree** (`NoWorkTreeException: Bare Repository`). When running `mdl :build` or `sbt` from a `git worktree add`-created directory (whose `.git` is a file, not a directory), sbt-git throws this error. Work around by cloning the repo to a real directory (e.g., `git clone <repo> /tmp/baboon-ci-clone`) and running the pipeline from there.
+- **Local Kotlin OOM workaround:** `bazel test //...` runs language test actions in parallel by default. On laptops with <16 GB RAM the Kotlin compiler daemon OOMs under the parallel matrix (documented in `docs/logs/20260428-2350-m16-closeout-log.md`). Run `bazel test --jobs=1 //...` to force serial execution. Slower (~20 min) but completes on memory-constrained machines. CI uses default parallelism.
+- **sbt-git (jgit) cannot build inside a linked git worktree** (`NoWorkTreeException: Bare Repository`). When running `bazel build //...` or `sbt` from a `git worktree add`-created directory (whose `.git` is a file, not a directory), sbt-git throws this error. Work around by cloning the repo to a real directory (e.g., `git clone <repo> /tmp/baboon-ci-clone`) and running the pipeline from there.
 - **Swift 64KB-constant limit (D7/T23):** `baboon_runtime.swift` was split into `baboon_runtime.swift` (pure domain runtime) and `baboon_service_wiring.swift` (service-wiring runtime) to stay within the JVM 64KB bytecode-constant limit hit when the Swift runtime is embedded via `PortableResource.embedSources`. After modifying `baboon-compiler/src/main/resources/baboon-runtime/`, run `sbt clean` before `sbt compile` (the macro caches content per build).
 - **Rust / Swift 64KB-constant limit (forward-compat envelope work, 2026-09):** `baboon_codecs_facade.rs` and then `baboon_runtime.swift` crossed the same JVM string-constant limit. Rust: `BaboonTypeMeta` and `mod baboon_type_meta_codec` live in `baboon_type_meta.rs`, re-exported from the facade so every `crate::baboon_codecs_facade::…` path still resolves. Swift: `BaboonVersion`/`BaboonDomainVersion`/`BaboonTypeMeta`/`BaboonTypeMetaCodec` live in `baboon_type_meta.swift` (same module, no imports needed). The compile error to recognise is `UTF8 string too large ... bad String constant of length N` while emitting `BaboonRuntimeResources$`; the fix is always to split the runtime file and add an output entry for the new file in the translator's shared-runtime list.
 - **Swift `Package.swift` is hand-written:** `test/sw-stub/Package.swift` lists every generated module as an explicit `.target` (one per domain version, older versions depended upon by newer ones), a `.testTarget` per module under `Tests/BaboonTests/<Module>`, and the `RuntimeTests` dependencies. SwiftPM only *warns* about `Sources/<Dir>` folders that belong to no target, so a fixture domain added to the shared model dir compiles and is tested in the other 8 backends but would be silently skipped by the Swift lane (this happened to `fwd-e2e-ok` / `fwd-e2e-chain-ok` in 2026-09, and to 14 more modules by 2026-11). `scripts/swift-check-targets.sh`, run by `test-swift-{regular,wrapped}`, now fails the lane on any `Sources/<Dir>` or `Tests/BaboonTests/<Dir>` that no target claims. Add the targets in the same commit as the fixture.
@@ -61,27 +62,23 @@ mdl :test-service-acceptance # service-flavour RPC wiring round-trips
 ### Build Commands
 ```bash
 # Format code
-mdl :fmt
+buildifier --lint=fix -r .
 
 # Build the compiler native executable
-mdl :build
+bazel build //baboon-compiler:baboon-native
+
+# Run the focused test lanes
+bazel build //...
+bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
 
 # Run the full test suite
-mdl :build :test
+bazel test //...
 
-# Run specific test suites independently:
-# - Regular ADT tests
-mdl :build :test-gen-regular-adt :test-cs-regular :test-scala-regular :test-rust-regular :test-typescript-regular :test-kotlin-regular :test-kotlin-kmp-regular :test-java-regular :test-dart-regular :test-swift-regular
-# - Wrapped ADT tests
-mdl :build :test-gen-wrapped-adt :test-cs-wrapped :test-scala-wrapped :test-rust-wrapped :test-typescript-wrapped :test-kotlin-wrapped :test-kotlin-kmp-wrapped :test-java-wrapped :test-dart-wrapped :test-swift-wrapped
-# - Manual/compatibility tests
-mdl :build :test-gen-manual :test-gen-compat-scala :test-gen-compat-cs :test-gen-compat-rust :test-gen-compat-typescript :test-gen-compat-kotlin :test-gen-compat-kotlin-kmp :test-gen-compat-java :test-gen-compat-dart :test-gen-compat-swift :test-manual-cs :test-manual-scala :test-manual-rust :test-manual-typescript :test-manual-kotlin :test-manual-kotlin-kmp :test-manual-java :test-manual-dart :test-manual-swift
-
-# Run complete build pipeline (format, build, test)
-mdl :full-build
+# Run specific test suites independently via focused Bazel lanes, e.g.
+# bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
 
 # Create distribution packages
-mdl :build :mkdist
+bazel build //...
 ```
 
 ### Direct SBT Commands (for development)
@@ -202,7 +199,7 @@ Baboon files support:
 - Evolution tests validating schema migration
 - MCP server round-trip tests in `test/<lang>-stub-mcp-overlay/` (one per backend; runs against `mcp-stub-ok` model with `--<lang>-generate-mcp-server=true`)
 
-**MCP server generation** (off by default): each of the 9 backends supports `--<lang>-generate-mcp-server=true` (where `<lang>` is `cs`, `scala`, `py`, `rs`, `ts`, `kt`, `jv`, `dt`, `sw`). When the flag is absent, the compiler output is byte-identical to the pre-MCP baseline — no extra files are written. The MCP test harness uses `baboon-compiler/src/test/resources/mcp-stub-ok/mcp_stub.baboon` (isolated from the shared model-dir — see D9 note above) with overlay directories `test/<lang>-stub-mcp-overlay/` layered on top of the standard stub project. Harness actions: `test-gen-<lang>-mcp` + `test-<lang>-mcp`. All 9 MCP lanes are included in `mdl :test` and `mdl :ci`.
+**MCP server generation** (off by default): each of the 9 backends supports `--<lang>-generate-mcp-server=true` (where `<lang>` is `cs`, `scala`, `py`, `rs`, `ts`, `kt`, `jv`, `dt`, `sw`). When the flag is absent, the compiler output is byte-identical to the pre-MCP baseline — no extra files are written. The MCP test harness uses `baboon-compiler/src/test/resources/mcp-stub-ok/mcp_stub.baboon` (isolated from the shared model-dir — see D9 note above) with overlay directories `test/<lang>-stub-mcp-overlay/` layered on top of the standard stub project. Harness actions: `test-gen-<lang>-mcp` + `test-<lang>-mcp`. All 9 MCP lanes are included in `bazel test //...` and `bazel test //...`.
 
 **Parallel Test Execution**: Test actions `test-gen-regular-adt` and `test-gen-wrapped-adt` can run in parallel. Each action:
 1. Creates an isolated temporary directory under `target/` (`test-regular/` or `test-wrapped/`)

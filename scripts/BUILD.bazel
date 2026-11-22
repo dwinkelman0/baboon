@@ -1,0 +1,27 @@
+load("@rules_python//python:defs.bzl", "py_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+py_binary(
+    name = "codegen",
+    srcs = ["codegen.py"],
+    main = "codegen.py",
+)
+
+py_binary(
+    name = "cross_version_compat",
+    srcs = ["cross_version_compat.py"],
+    main = "cross_version_compat.py",
+)
+
+py_binary(
+    name = "gen-big-model",
+    srcs = ["gen-big-model.py"],
+    main = "gen-big-model.py",
+)
+
+py_binary(
+    name = "gen_baboon_resources",
+    srcs = ["gen_baboon_resources.py"],
+    main = "gen_baboon_resources.py",
+)

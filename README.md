@@ -157,7 +157,7 @@ The CLI is multi-modal: global options (model inputs, lockfile, evolution metada
 
 **Full option reference (global and per-target): [docs/cli-reference.md](docs/cli-reference.md)**, or run `baboon --help`.
 
-See build configuration in [.mdl/defs/actions.md](.mdl/defs/actions.md) and test configuration in [.mdl/defs/tests.md](.mdl/defs/tests.md).
+See the Bazel build definition in [`docs/bazel.md`](docs/bazel.md) and the `BUILD.bazel` files.
 
 ## Notes
 
@@ -185,33 +185,34 @@ A foreign block may declare a wire-level Baboon equivalent with `rt = <baboon ty
 
 ### Build commands
 
-This project uses [mudyla](https://github.com/7mind/mudyla) for build orchestration.
+This project uses Bazel for build orchestration (see [`docs/bazel.md`](docs/bazel.md)).
 
 #### Common Commands
 
 ```bash
 # Format code
-direnv exec . mdl :fmt
+buildifier --lint=fix -r .
 
 # Build the compiler
-direnv exec . mdl :build
+bazel build //...
 
 # Run complete test suite
-direnv exec . mdl :build :test
+bazel build //...
+bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
 
 # Run full build pipeline (format, build, test)
-direnv exec . mdl :full-build
+bazel build //... && bazel test //...
 
-# Run specific test suites
-direnv exec . mdl :build :test-gen-regular-adt :test-cs-regular :test-scala-regular :test-rust-regular :test-typescript-regular :test-kotlin-regular :test-java-regular :test-dart-regular :test-swift-regular
-direnv exec . mdl :build :test-gen-wrapped-adt :test-cs-wrapped :test-scala-wrapped :test-rust-wrapped :test-typescript-wrapped :test-kotlin-wrapped :test-java-wrapped :test-dart-wrapped :test-swift-wrapped
-direnv exec . mdl :build :test-gen-manual :test-gen-compat-scala :test-gen-compat-cs :test-gen-compat-rust :test-gen-compat-typescript :test-gen-compat-kotlin :test-gen-compat-java :test-gen-compat-dart :test-gen-compat-swift :test-manual-cs :test-manual-scala :test-manual-rust :test-manual-typescript :test-manual-kotlin :test-manual-java :test-manual-dart :test-manual-swift
+# Run focused test lanes
+bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
+bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
+bazel test //...
 
 # Create distribution packages
-direnv exec . mdl :build :mkdist
+bazel build //...
 
 # Build with custom distribution paths
-direnv exec . mdl --mkdist-source=./custom/path --mkdist-target=./output :build :mkdist
+bazel build //...
 ```
 
 #### Setting up the environment

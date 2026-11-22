@@ -1,0 +1,10 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_python//python:defs.bzl", "py_binary")
+
+# Shared unittest-discovery runner (see module docstring for rationale).
+py_binary(
+    name = "py_unittest_discover",
+    srcs = ["py_unittest_discover.py"],
+    main = "py_unittest_discover.py",
+)

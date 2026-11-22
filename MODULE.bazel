@@ -1,0 +1,131 @@
+module(name = "baboon", version = "0.0.0")
+
+# --- bzlmod deps ---
+bazel_dep(name = "rules_scala", version = "7.4.1")
+bazel_dep(name = "rules_python", version = "0.40.0")
+bazel_dep(name = "rules_rust", version = "0.69.0")
+bazel_dep(name = "rules_cc", version = "0.2.4")
+bazel_dep(name = "rules_java", version = "7.6.1")
+bazel_dep(name = "rules_jvm_external", version = "6.8")
+bazel_dep(name = "protobuf", version = "36.2")
+
+# --- Scala 2.13.18 ---
+scala_config = use_extension("@rules_scala//scala/extensions:config.bzl", "scala_config")
+scala_config.settings(scala_version = "2.13.18")
+use_repo(scala_config, "rules_scala_config")
+
+scala_deps = use_extension("@rules_scala//scala/extensions:deps.bzl", "scala_deps")
+scala_deps.scala()
+# NOTE: rules_scala 7.x resolves the scala compiler repos via toolchains;
+# the 6.x-style `use_repo(scala_deps, "scala_2_13_18")` import no longer exists.
+
+# --- Python 3.12 + pip ---
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(python_version = "3.12", is_default = True)
+use_repo(python, "python_3_12")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "py_stub_deps",
+    python_version = "3.12",
+    requirements_lock = "//test/py-stub:requirements.txt",
+)
+use_repo(pip, "py_stub_deps")
+
+# --- Rust 1.75, edition 2021 ---
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    # 1.75 is the crates' MSRV floor; 1.90 builds current transitive deps
+    # (e.g. getrandom 0.4.x needs edition 2024) and links working binaries
+    # with the Xcode 27 linker (1.85 emitted dylibs the loader rejects).
+    versions = ["1.90.0"],
+    # rustc's `-C strip=debuginfo` (rules_rust's opt/exec-config default)
+    # produces corrupt Mach-O (mis-aligned LINKEDIT) with this Xcode;
+    # disable it — later codegen flags override earlier ones in rustc.
+    # Needed for both target and exec configs: proc-macros and build
+    # scripts always compile in the opt-exec configuration.
+    extra_rustc_flags = ["--codegen=strip=none"],
+    extra_exec_rustc_flags = ["--codegen=strip=none"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "rs_stub_deps",
+    manifests = ["//test/rs-stub:Cargo.toml"],
+)
+use_repo(crate, "rs_stub_deps")
+
+# --- JVM / Maven (Coursier) deps matching build.sbt ---
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "maven",
+    artifacts = [
+        "com.lihaoyi:fastparse_2.13:3.1.1",
+        "io.7mind.izumi:fundamentals-platform_2.13:1.3.0-M4",
+        "io.7mind.izumi:fundamentals-bio_2.13:1.3.0-M4",
+        "io.7mind.izumi:fundamentals-basics_2.13:1.3.0-M4",
+        "io.7mind.izumi:fundamentals-functoid_2.13:1.3.0-M4",
+        "io.7mind.izumi:fundamentals-orphans_2.13:1.3.0-M4",
+        "org.typelevel:cats-core_2.13:2.13.0",
+        "org.typelevel:cats-kernel_2.13:2.13.0",
+        "io.7mind.izumi:distage-core-api_2.13:1.3.0-M4",
+        "dev.zio:izumi-reflect_2.13:3.0.8",
+        "dev.zio:izumi-reflect-thirdparty-boopickle-shaded_2.13:3.0.8",
+        "com.chuusai:shapeless_2.13:2.3.13",
+        "io.7mind.izumi:fundamentals-functional_2.13:1.3.0-M4",
+        "io.7mind.izumi:fundamentals-language_2.13:1.3.0-M4",
+        "io.7mind.izumi:fundamentals-collections_2.13:1.3.0-M4",
+        "io.7mind.izumi:distage-core_2.13:1.3.0-M4",
+        "io.github.classgraph:classgraph:4.8.195",
+        "org.scalatest:scalatest_2.13:3.2.20",
+        "io.circe:circe-core_2.13:0.14.16",
+        "io.circe:circe-generic_2.13:0.14.16",
+        "io.circe:circe-parser_2.13:0.14.16",
+        "com.softwaremill.magnolia1_2:magnolia_2.13:1.1.14",
+        "org.scala-lang:scala-reflect:2.13.18",
+        "com.github.alexarchambault:case-app_2.13:2.1.0",
+        "com.github.alexarchambault:case-app-util_2.13:2.1.0",
+        "com.github.alexarchambault:case-app-annotations_2.13:2.1.0",
+        "io.github.alexarchambault:data-class_2.13:0.2.7",
+        "com.lihaoyi:sourcecode_2.13:0.4.2",
+        "io.7mind.izumi:distage-testkit-scalatest_2.13:1.3.0-M4",
+        "dev.zio:zio_2.13:2.1.24",
+        "com.networknt:json-schema-validator:3.0.7",
+        "io.github.cquiroz:scala-java-time_2.13:2.6.0",
+        "org.typelevel:kind-projector_2.13.18:0.13.4",
+    ],
+    fetch_sources = False,
+    repositories = [
+        "https://repo1.maven.org/maven2",
+        "https://central.sonatype.com/repository/maven-snapshots/",
+    ],
+)
+use_repo(maven, "maven")
+
+# jline 4.4.5 fetched directly: rules_jvm_external's coursier invocation tries to
+# fetch a non-existent jline-4.4.5-jdk8.jar for any jline coordinate, so keep
+# jline out of maven.install and pin the plain jar (same bytes sbt resolves).
+http_jar = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_jar")
+
+http_jar(
+    name = "jline",
+    sha256 = "8dd8b58f38a0d428d51c1dd0bcc5ea2086850cad60851faf55fa82c0a17f9c0c",
+    url = "https://repo1.maven.org/maven2/org/jline/jline/4.4.5/jline-4.4.5.jar",
+)
+
+# --- Java toolchain: default JDK via remotejdk_21 (see .bazelrc) ---
+# TODO: add GraalVM CE 23 JDK (multi-platform URLs + sha256 + java_runtime
+# toolchain + register_toolchains) once verified; the previous single-URL
+# linux-only http_archive with empty sha256 was removed as a skeleton blocker.
+# http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+# http_archive(
+#     name = "graalvm_ce_23",
+#     build_file_content = """java_runtime(name = "runtime", srcs = glob(["**"]), visibility = ["//visibility:public"])""",
+#     sha256 = "<fill per-platform sha256 from https://github.com/graalvm/graalvm-ce-builds/releases/tag/jdk-21.0.2>",
+#     urls = [
+#         "https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-21.0.2/graalvm-community-jdk-21.0.2_linux-x64_bin.tar.gz",
+#     ],
+# )

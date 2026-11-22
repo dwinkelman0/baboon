@@ -1,0 +1,65 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:baboon.bzl", "baboon_rust_gen")
+load(":generated.bzl", "RS_GENERATED")
+
+package(default_visibility = ["//visibility:public"])
+
+# Runs the Baboon compiler over the shared .baboon test corpus and captures
+# the generated crate (lib.rs + all modules) as explicit outputs. Replaces the
+# mdl test-gen-rs lanes, which generated into a target/ copy of this stub.
+# Regenerates automatically whenever models or the compiler change; the file
+# set itself is pinned in generated.bzl (re-list when models change).
+baboon_rust_gen(
+    name = "gen_rs",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--rs-write-evolution-dict=true",
+        "--rs-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    lang = ":rust",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = RS_GENERATED,
+)
+
+RS_DEPS = [
+    "@rs_stub_deps//:serde",
+    "@rs_stub_deps//:serde_json",
+    "@rs_stub_deps//:chrono",
+    "@rs_stub_deps//:uuid",
+    "@rs_stub_deps//:rust_decimal",
+    "@rs_stub_deps//:hex",
+    "@rs_stub_deps//:rand",
+]
+
+# The generated crate root (gen_rs/lib.rs) is auto-discovered from srcs;
+# sibling modules resolve inside the tree artifact. crate_name matches what
+# the committed integration tests import (baboon_rs_stub::...).
+# NOTE: the hand-written src/lib.rs is superseded by the generated one and is
+# intentionally not compiled.
+rust_library(
+    name = "rs_stub",
+    srcs = [":gen_rs"],
+    crate_features = [
+        "decimal",
+        "json-helpers",
+        "timestamps",
+        "uuids",
+    ],
+    crate_name = "baboon_rs_stub",
+    edition = "2021",
+    deps = RS_DEPS,
+)
+
+# Committed integration tests, one target per file (cargo parity).
+[
+    rust_test(
+        name = "test_" + f.replace("/", "_").replace(".rs", ""),
+        srcs = [f],
+        edition = "2021",
+        deps = [":rs_stub"] + RS_DEPS,
+    )
+    for f in glob(["tests/*.rs"])
+]

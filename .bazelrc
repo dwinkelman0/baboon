@@ -1,0 +1,12 @@
+# Bazel flags for baboon (Bzlmod, GraalVM 23 compatible).
+common --enable_bzlmod
+common --java_language_version=21
+common --tool_java_language_version=21
+common --java_runtime_version=remotejdk_21
+common --tool_java_runtime_version=remotejdk_21
+
+build --incompatible_enable_cc_toolchain_resolution
+build --enable_platform_specific_config
+
+# Scala strictness mirrors build.sbt -Wconf promotion of match-analysis to error.
+build --incompatible_strict_action_env

@@ -1,0 +1,126 @@
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(":py_generated_main.bzl", "PY_GENERATED_MAIN")
+load(":py_generated_review.bzl", "PY_GENERATED_REVIEW")
+
+package(default_visibility = ["//visibility:public"])
+
+# Second model corpus for the ReviewTests lane (mirrors mdl test-python-regular,
+# which regenerates from ReviewModels into GeneratedReview/).
+filegroup(
+    name = "review_models",
+    srcs = glob(["ReviewModels/**"]),
+)
+
+# Main-corpus codegen: BaboonDefinitions/Generated + BaboonTests/{GeneratedTests,GeneratedFixtures}.
+# Replaces mdl test-gen-py (which generated into a target/ copy of this stub).
+baboon_codegen(
+    name = "gen_main",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+        "--py-write-evolution-dict=true",
+        "--py-wrapped-adt-branch-codecs=false",
+    ],
+    fixture_output = "genmain/BaboonTests/GeneratedFixtures",
+    lang = ":python",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = PY_GENERATED_MAIN,
+    output = "genmain/BaboonDefinitions/Generated",
+    test_output = "genmain/BaboonTests/GeneratedTests",
+)
+
+# ReviewModels codegen for the ReviewTests lane (mirrors mdl's GeneratedReview step).
+baboon_codegen(
+    name = "gen_review",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--generate-json-codecs-by-default=true",
+        "--generate-ueba-codecs-by-default=true",
+        "--py-wrapped-adt-branch-codecs=false",
+    ],
+    fixture_output = "genreview/BaboonTests/GeneratedFixtures",
+    lang = ":python",
+    model_dir = "test/py-stub/ReviewModels",
+    models = ":review_models",
+    outs = PY_GENERATED_REVIEW,
+    output = "genreview/BaboonDefinitions/Generated",
+    test_output = "genreview/BaboonTests/GeneratedTests",
+)
+
+py_library(
+    name = "py_gen_main",
+    srcs = [":gen_main"],
+    imports = ["genmain"],
+    deps = ["@py_stub_deps//pydantic:pkg"],
+)
+
+py_library(
+    name = "py_gen_review",
+    srcs = [":gen_review"],
+    imports = ["genreview"],
+    deps = ["@py_stub_deps//pydantic:pkg"],
+)
+
+# Hand-written tests and helpers. imports=["."] puts test/py-stub itself on
+# sys.path so namespace packages (BaboonTests.*, ReviewTests) resolve; the
+# generated roots come transitively from py_gen_main / py_gen_review.
+# NOTE: BaboonTests/ spans hand-written and generated roots; all packages
+# involved lack top-level __init__.py (PEP 420), so they merge on sys.path.
+py_library(
+    name = "py_stub",
+    srcs = glob(["BaboonTests/**/*.py", "ReviewTests/*.py"]),
+    imports = ["."],
+    deps = ["@py_stub_deps//pydantic:pkg"],
+)
+
+_RUNNER = "//tools/bazel:py_unittest_discover.py"
+
+# Lane 1 (mdl test-python-regular): generated pkg0 codec tests.
+# Needs the cross-language fixture root (populated by peer language lanes in
+# mdl); under Bazel only Python/Rust exist so far, so point it at an (empty)
+# valid anchor: self-contained tests pass, tests reading C# fixtures fail
+# with a clear FileNotFoundError until the C# lane lands. legacy_create_init
+# is off everywhere: auto-added __init__.py files would turn the split
+# PEP-420 namespace packages (BaboonTests/ across roots) into regular
+# packages, hiding one side.
+py_test(
+    name = "test_py_genpkg",
+    args = ["BaboonTests.GeneratedTests.testpkg.pkg0"],
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+    imports = ["."],
+    legacy_create_init = False,
+    main = _RUNNER,
+    srcs = [_RUNNER],
+    deps = [":py_gen_main"],
+)
+
+# Lane 2: hand-written runtime tests against the main corpus.
+py_test(
+    name = "test_py_runtime",
+    args = ["BaboonTests.RuntimeTests"],
+    imports = ["."],
+    legacy_create_init = False,
+    main = _RUNNER,
+    srcs = [_RUNNER],
+    deps = [
+        ":py_gen_main",
+        ":py_stub",
+    ],
+)
+
+# Lane 3: ReviewTests against the ReviewModels corpus.
+py_test(
+    name = "test_py_review",
+    args = ["ReviewTests"],
+    imports = ["."],
+    legacy_create_init = False,
+    main = _RUNNER,
+    srcs = [_RUNNER],
+    deps = [
+        ":py_gen_review",
+        ":py_stub",
+    ],
+)
