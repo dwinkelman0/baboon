@@ -9,3 +9,5 @@ printf 'Rust conversion test output: %s\n' "$test_dir"
 cp "$fixture_dir/Cargo.toml" "$test_dir/Cargo.toml"
 cp -r "$fixture_dir/tests" "$test_dir/tests"
 cargo test --manifest-path "$test_dir/Cargo.toml" --test conversions
+# Bazel path (cargo logic above retained for local runs):
+#   bazel test //test/rs-conversion-regression:test_tests_conversions

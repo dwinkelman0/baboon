@@ -1,0 +1,96 @@
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(":generated.bzl", "JV_GENERATED_LIB", "JV_GENERATED_TEST")
+
+package(default_visibility = ["//visibility:public"])
+
+# Baboon Java codegen over the shared .baboon test corpus (regular lane;
+# mirrors mdl test-gen-java-regular: --jv-wrapped-adt-branch-codecs=false).
+# Regenerates automatically whenever models or the compiler change; the file
+# set itself is pinned in generated.bzl (re-list when models change).
+#
+# Lib vs test split mirrors the stub layout: BaboonDefinitions (+fixtures)
+# compile into the netstandard-style main jar; generated codec tests plus the
+# hand-written runtime tests run under :jv_tests.
+baboon_codegen(
+    name = "gen_jv_lib",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--jv-write-evolution-dict=true",
+        "--jv-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "genjava-fixture",
+    lang = ":java",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = JV_GENERATED_LIB,
+    output = "genjava-main",
+    test_output = "genjava-test",
+)
+
+baboon_codegen(
+    name = "gen_jv_test",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--jv-write-evolution-dict=true",
+        "--jv-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "genjava-fixture",
+    lang = ":java",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = JV_GENERATED_TEST,
+    output = "genjava-main",
+    test_output = "genjava-test",
+)
+
+JV_DEPS = [
+    "@maven//:com_fasterxml_jackson_core_jackson_databind",
+    "@maven//:com_fasterxml_jackson_core_jackson_core",
+    "@maven//:com_fasterxml_jackson_core_jackson_annotations",
+]
+
+java_library(
+    name = "jv_lib",
+    srcs = [":gen_jv_lib"],
+    # Generated UEBA codecs contain tautological int-range comparisons that
+    # Error Prone flags as errors; hand-written code stays fully checked.
+    javacopts = ["-Xep:ComparisonOutOfRange:OFF"],
+    deps = JV_DEPS,
+)
+
+# Test library: generated codec tests + hand-written runtime specs.
+java_library(
+    name = "jv_test_lib",
+    srcs = [":gen_jv_test"] + glob(["src/test/java/**/*.java"]),
+    javacopts = ["-Xep:ComparisonOutOfRange:OFF"],
+    deps = JV_DEPS + [
+        ":jv_lib",
+        "@maven//:org_junit_jupiter_junit_jupiter",
+        "@maven//:org_junit_jupiter_junit_jupiter_api",
+    ],
+)
+
+# JUnit 5 platform console launcher (mirrors `mvn test`). Scans the test
+# classpath; the cross-language fixture root override matches the other
+# lanes (tests needing peer-language fixtures fail with a clear error
+# until those lanes land).
+java_test(
+    name = "jv_tests",
+    args = [
+        "--scan-classpath",
+        "--class-path=$(location :jv_test_lib)",
+    ],
+    data = [":jv_test_lib"],
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+    main_class = "org.junit.platform.console.ConsoleLauncher",
+    test_class = "org.junit.platform.console.ConsoleLauncher",
+    runtime_deps = [
+        ":jv_test_lib",
+        "@maven//:org_junit_platform_junit_platform_console_standalone",
+    ],
+)

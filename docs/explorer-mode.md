@@ -19,8 +19,8 @@ baboon --model-dir ./schemas --model ./extra/types.baboon :explore
 Run explorer on the test models:
 
 ```bash
-# Build the compiler first
-mdl :build
+# Build the compiler first (deprecated: mdl :build — use bazel build //baboon-compiler/...)
+bazel build //baboon-compiler/...
 
 # Launch explorer
 baboon --model-dir baboon-compiler/src/test/resources/baboon :explore

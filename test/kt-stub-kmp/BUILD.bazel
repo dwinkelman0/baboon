@@ -1,0 +1,93 @@
+load("@rules_kotlin//kotlin:core.bzl", "kt_kotlinc_options")
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(":generated.bzl", "KT_GENERATED_LIB", "KT_GENERATED_TEST")
+
+package(default_visibility = ["//visibility:public"])
+
+# KMP-variant codegen (mirrors mdl test-gen-kotlin-kmp-regular; identical
+# flags plus --kt-multiplatform=true). Regenerates automatically when models
+# or the compiler change; the file set is pinned in generated.bzl.
+baboon_codegen(
+    name = "gen_kmp_lib",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--kt-write-evolution-dict=true",
+        "--kt-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+        "--kt-multiplatform=true",
+    ],
+    fixture_output = "genkmp-fixture",
+    lang = ":kotlin",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = KT_GENERATED_LIB,
+    output = "genkmp-main",
+    test_output = "genkmp-test",
+)
+
+baboon_codegen(
+    name = "gen_kmp_test",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--kt-write-evolution-dict=true",
+        "--kt-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+        "--kt-multiplatform=true",
+    ],
+    fixture_output = "genkmp-fixture",
+    lang = ":kotlin",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = KT_GENERATED_TEST,
+    output = "genkmp-main",
+    test_output = "genkmp-test",
+)
+
+# Matches test/kt-stub-kmp/build.gradle.kts: +kotlinx-datetime, opt-in to the
+# experimental Uuid API (generated KMP code uses it), warnings not errors.
+kt_kotlinc_options(
+    name = "kmp_opts",
+    x_optin = ["kotlin.uuid.ExperimentalUuidApi"],
+)
+
+KT_DEPS = [
+    "@maven//:org_jetbrains_kotlin_kotlin_test",
+    "@maven//:org_jetbrains_kotlin_kotlin_test_junit5",
+    "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json_jvm",
+    "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core_jvm",
+    "@maven//:org_jetbrains_kotlinx_kotlinx_datetime_jvm",
+    "@maven//:org_junit_jupiter_junit_jupiter_api",
+]
+
+kt_jvm_library(
+    name = "kt_stub",
+    srcs = [":gen_kmp_lib"],
+    deps = KT_DEPS,
+    kotlinc_opts = ":kmp_opts",
+)
+
+kt_jvm_library(
+    name = "kt_test_lib",
+    # Friend-path to the lib (Gradle test-source-set semantics): internal
+    # members stay visible. Must not also appear in deps.
+    associates = [":kt_stub"],
+    kotlinc_opts = ":kmp_opts",
+    srcs = [":gen_kmp_test"] + glob(["src/test/kotlin/**/*.kt"]),
+    deps = KT_DEPS,
+)
+
+java_test(
+    name = "kt_tests",
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+    main_class = "runner.ConsoleTestRunner",
+    test_class = "runner.ConsoleTestRunner",
+    runtime_deps = [
+        "//test/kt-stub:console_runner",
+        ":kt_test_lib",
+        "@maven//:org_junit_platform_junit_platform_console_standalone",
+    ],
+)

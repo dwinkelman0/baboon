@@ -8,6 +8,25 @@ bazel_dep(name = "rules_cc", version = "0.2.4")
 bazel_dep(name = "rules_java", version = "7.6.1")
 bazel_dep(name = "rules_jvm_external", version = "6.8")
 bazel_dep(name = "protobuf", version = "36.2")
+bazel_dep(name = "rules_dotnet", version = "0.22.2")
+bazel_dep(name = "aspect_rules_js", version = "2.8.3")
+# aspect_rules_js 2.8.3 floor-pins aspect_bazel_lib 2.17.1, whose toolchain
+# rules pass `incompatible_use_toolchain_transition` (removed in Bazel 9).
+# Pin a newer release whose lib/private/*_toolchain.bzl no longer uses that
+# kwarg (verified: 9 hits in 2.17.1, 0 in 2.19.4 tarballs); MVS keeps this.
+bazel_dep(name = "aspect_bazel_lib", version = "2.19.4")
+# rules_nodejs 6.3.0's nodejs_toolchains_repo.bzl passes
+# `incompatible_use_toolchain_transition` (removed in Bazel 9), and its
+# nodejs/toolchain.bzl uses the implicit CcInfo global (removed in Bazel 9).
+# 6.7.3 is the first 6.7.x release (minimal bump carrying both upstream
+# fixes; verified: 0 kwarg hits, CcInfo loaded from @rules_cc//cc:defs.bzl).
+# Satisfies aspect_rules_js 2.8.3's 6.3.0 floor so MVS stays quiet.
+bazel_dep(name = "rules_nodejs", version = "6.7.3")
+bazel_dep(name = "rules_kotlin", version = "2.3.20")
+bazel_dep(name = "rules_dart", version = "0.10.0")
+# NB: resolved to 3.1.2 by MVS (a transitive dep requires it over 2.5.0);
+# pin the resolved version so --check_direct_dependencies stays quiet.
+bazel_dep(name = "rules_swift", version = "3.1.2")
 
 # --- Scala 2.13.18 ---
 scala_config = use_extension("@rules_scala//scala/extensions:config.bzl", "scala_config")
@@ -16,6 +35,8 @@ use_repo(scala_config, "rules_scala_config")
 
 scala_deps = use_extension("@rules_scala//scala/extensions:deps.bzl", "scala_deps")
 scala_deps.scala()
+scala_deps.junit()
+scala_deps.scalatest()
 # NOTE: rules_scala 7.x resolves the scala compiler repos via toolchains;
 # the 6.x-style `use_repo(scala_deps, "scala_2_13_18")` import no longer exists.
 
@@ -54,7 +75,21 @@ register_toolchains("@rust_toolchains//:all")
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "rs_stub_deps",
-    manifests = ["//test/rs-stub:Cargo.toml"],
+    # Single hub covering every Cargo crate with sources. The manifests
+    # share the serde/chrono/uuid/rust_decimal/hex/rand core; only
+    # test/services/rs adds tiny_http + ureq (unioned here, no second hub).
+    # Kept lockfile-free like the Cargo lanes (no Cargo.lock in repo).
+    manifests = [
+        "//test/rs-stub:Cargo.toml",
+        "//test/conv-test-rs:Cargo.toml",
+        "//test/rs-conversion-regression:Cargo.toml",
+        "//test/services/rs:Cargo.toml",
+    ],
+    # NOTE: test/services/rs-async and rs-async-errors carry Cargo.toml
+    # files with no targets (no src/lib.rs, src/main.rs, [lib] or [[bin]]),
+    # so crate_universe cannot generate a lockfile entry for them and they
+    # must stay out of this list until sources exist. Their stub BUILD files
+    # document the future wiring.
 )
 use_repo(crate, "rs_stub_deps")
 
@@ -84,6 +119,14 @@ maven.install(
         "io.circe:circe-core_2.13:0.14.16",
         "io.circe:circe-generic_2.13:0.14.16",
         "io.circe:circe-parser_2.13:0.14.16",
+        "io.circe:circe-numbers_2.13:0.14.16",
+        "org.scalatest:scalatest-flatspec_2.13:3.2.20",
+        "org.scalatest:scalatest-funsuite_2.13:3.2.20",
+        "org.scalatest:scalatest-core_2.13:3.2.20",
+        "org.scalatest:scalatest-shouldmatchers_2.13:3.2.20",
+        "org.scalatest:scalatest-matchers-core_2.13:3.2.20",
+        "org.scalactic:scalactic_2.13:3.2.20",
+        "org.scalatest:scalatest-compatible:3.2.20",
         "com.softwaremill.magnolia1_2:magnolia_2.13:1.1.14",
         "org.scala-lang:scala-reflect:2.13.18",
         "com.github.alexarchambault:case-app_2.13:2.1.0",
@@ -93,6 +136,26 @@ maven.install(
         "com.lihaoyi:sourcecode_2.13:0.4.2",
         "io.7mind.izumi:distage-testkit-scalatest_2.13:1.3.0-M4",
         "dev.zio:zio_2.13:2.1.24",
+        # --- jv-stub (test/jv-stub/pom.xml: jackson 2.18.2, junit-jupiter 5.11.4) ---
+        # Surefire stays out of the Bazel build (bazel test runs suites itself).
+        "com.fasterxml.jackson.core:jackson-databind:2.18.2",
+        "com.fasterxml.jackson.core:jackson-core:2.18.2",
+        "com.fasterxml.jackson.core:jackson-annotations:2.18.2",
+        "org.junit.jupiter:junit-jupiter:5.11.4",
+        "org.junit.jupiter:junit-jupiter-api:5.11.4",
+        "org.junit.platform:junit-platform-console-standalone:1.11.4",
+        "org.jetbrains.kotlinx:kotlinx-serialization-json-jvm:1.8.0",
+        "org.jetbrains.kotlinx:kotlinx-serialization-core-jvm:1.8.0",
+        "org.jetbrains.kotlinx:kotlinx-datetime-jvm:0.6.2",
+        "org.jetbrains.kotlin:kotlin-test:2.1.0",
+        "org.jetbrains.kotlin:kotlin-test-junit5:2.1.0",
+        # --- sc-stub (test/sc-stub: scala 2.13.16, scalatest 3.2.19, circe 0.14.13) ---
+        # Kept alongside the 3.2.20 / 0.14.16 lines above (compiler build);
+        # coursier resolves both revisions hermetically.
+        "org.scalatest:scalatest_2.13:3.2.19",
+        "io.circe:circe-core_2.13:0.14.13",
+        "io.circe:circe-generic_2.13:0.14.13",
+        "io.circe:circe-parser_2.13:0.14.13",
         "com.networknt:json-schema-validator:3.0.7",
         "io.github.cquiroz:scala-java-time_2.13:2.6.0",
         "org.typelevel:kind-projector_2.13.18:0.13.4",
@@ -129,3 +192,88 @@ http_jar(
 #         "https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-21.0.2/graalvm-community-jdk-21.0.2_linux-x64_bin.tar.gz",
 #     ],
 # )
+
+# --- .NET SDK 9 (cs-stub: net9.0 tests / netstandard2.1 libs) ---
+# cs-stub pins NUnit 3.13.2 + NUnit3TestAdapter 4.2.0 (see
+# test/cs-stub/BaboonTests/BaboonTests.csproj). NuGet restore for the test
+# targets lands with the cs-stub BUILD step; here only the SDK download is
+# wired so `bazel mod graph` stays hermetic (no /nix/store hardcodes).
+dotnet = use_extension("@rules_dotnet//dotnet:extensions.bzl", "dotnet")
+dotnet.toolchain(dotnet_version = "9.0.100")
+use_repo(dotnet, "dotnet_toolchains")
+register_toolchains("@dotnet_toolchains//:all")
+
+# --- NuGet deps for cs-stub (test/cs-stub/BUILD.bazel wraps these via import_library) ---
+# Pinned by id + version + sha512 of the upstream .nupkg; restored hermetically
+# at build time, no local paths. Versions mirror
+# test/cs-stub/BaboonDefinitions/BaboonDefinitions.csproj (Newtonsoft.Json,
+# System.Collections.Immutable) and test/cs-stub/BaboonTests/BaboonTests.csproj (NUnit).
+nuget_archive = use_repo_rule("@rules_dotnet//dotnet:defs.bzl", "nuget_archive")
+
+nuget_archive(
+    id = "Newtonsoft.Json",
+    name = "nuget.newtonsoft.json",
+    sha512 = "sha512-mbJSvHfRxfX3tR/U6n1WU+mWHXswYc+SB/hkOpx8yZZe68hNZGfymJu0cjsaJEkVzCMqePiU6LdIyogqfIn7kg==",
+    sources = ["https://api.nuget.org/v3/index.json"],
+    version = "13.0.3",
+)
+
+nuget_archive(
+    id = "System.Collections.Immutable",
+    name = "nuget.system.collections.immutable",
+    sha512 = "sha512-z/Oo7nxWmZ0Y578vj8EUVrFJZ3DX6OMuUGlgeYgeeUZOFGT89XfaM8fDFMvJy6+mOIqW6ux5NdNzEnlTnQGJ7A==",
+    sources = ["https://api.nuget.org/v3/index.json"],
+    version = "9.0.0",
+)
+
+nuget_archive(
+    id = "NUnit",
+    name = "nuget.nunit",
+    sha512 = "sha512-foKGnF2ckq6uRAybnw1PIMDsDxdp1rbuEBJ4t2LYa5HDL80mOcEUjdbVqRDMTsKNiikfkPEBoeyGV42ZXiLLQA==",
+    sources = ["https://api.nuget.org/v3/index.json"],
+    version = "3.13.2",
+)
+
+# --- JavaScript/TypeScript (ts-stub: TS ~5.7.0, vitest ~3.0.0, node 24) ---
+# npm translation of the pnpm workspace lockfile. The workspace root owns the
+# lockfile (importers `.` and `test/ts-stub`) because test/* dirs carry no
+# BUILD files yet, so their labels cannot be watched by the extension; the
+# ts-stub BUILD step can add per-package entries later.
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "npm",
+    pnpm_lock = "//:pnpm-lock.yaml",
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm")
+
+# --- Kotlin (kt-stub, JVM_21) ---
+# NOTE: rules_kotlin's bundled kotlinc is used (not the project's 2.1.0):
+# mixing rules 2.3.x worker classes with a separately downloaded kotlinc
+# 2.1.0 crashes the FIR checker phase (AbstractMethodError on
+# FirDeclarationChecker: worker compiled against newer FIR API than the
+# downloaded compiler provides). Revisit with rules_kotlin 2.1.x if exact
+# compiler fidelity is ever required.
+rules_kotlin_extensions = use_extension("@rules_kotlin//src/main/starlark/core/repositories:bzlmod_setup.bzl", "rules_kotlin_extensions")
+use_repo(
+    rules_kotlin_extensions,
+    "com_github_google_ksp",
+    "com_github_jetbrains_kotlin",
+    "com_github_jetbrains_kotlin_git",
+    "com_github_pinterest_ktlint",
+    "kotlin_build_tools_impl",
+    "kotlinx_coroutines_core_jvm",
+    "kotlinx_serialization_core_jvm",
+    "kotlinx_serialization_json",
+    "kotlinx_serialization_json_jvm",
+)
+
+# --- Dart (dt-stub, sdk ^3.0.0) ---
+# No dart.toolchain tag: use rules_dart 0.10.0's pinned SDK (Dart 3.x),
+# which satisfies the stub's ^3.0.0 constraint. Pin an exact dart_version
+# here only if a stub needs a newer SDK than the pinned one.
+dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
+
+# --- Swift 5.9 (swift stubs, macOS .v13) ---
+# rules_swift self-registers its toolchains via its own module extensions and
+# builds against the local Xcode, so no user extension tags are needed.

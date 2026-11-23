@@ -1,1 +1,10 @@
 package(default_visibility = ["//visibility:public"])
+
+load("@npm//:defs.bzl", "npm_link_all_packages")
+
+# Workspace-root npm link stores for every pnpm importer (`.` and
+# `test/ts-stub`). The generated macro only emits the `.aspect_rules_js`
+# store targets when called in the root package; the `npm_link_all_packages`
+# call in test/ts-stub/BUILD.bazel creates per-package links that alias into
+# these stores, so this root call must exist for those links to resolve.
+npm_link_all_packages(name = "node_modules")

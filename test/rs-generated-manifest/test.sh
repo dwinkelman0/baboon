@@ -13,3 +13,8 @@ for edition in default 2021 2024; do
   "$@" --model-dir "$fixture_dir/models" :rust --output "$out" ${edition_args[@]+"${edition_args[@]}"}
   RUSTFLAGS="-D warnings" cargo build --manifest-path "$out/Cargo.toml"
 done
+# Bazel path (cargo loop above retained for local runs):
+# the stub lanes compile generated sources under their own manifests, so the
+# equivalent hermetic check is the per-lane bazel target, e.g.
+#   bazel build //test/rs-stub/...
+#   bazel build //test/conv-test-rs/...

@@ -62,17 +62,22 @@ jobs:
       - name: Refresh deps and build
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: nix develop --command bazel build //... && nix develop --command bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
+      - name: Build native binary (manual target, excluded from //...)
+        run: nix develop --command bazel build //baboon-compiler:baboon-native
       - name: Validate binary portability (outside Nix)
         # Deliberately inline: the whole point of this step
         # is to verify the binary runs without nix-shell environment leakage.
+        # The binary is the output of the Bazel `baboon-native` genrule
+        # (see baboon-compiler/BUILD.bazel), NOT the old sbt-native-image path.
         run: |
-          chmod +x baboon-compiler/.jvm/target/graalvm-native-image/baboon
+          BIN=bazel-bin/baboon-compiler/baboon-native-bin
+          chmod +x "$BIN"
           echo "=== file ==="
-          file baboon-compiler/.jvm/target/graalvm-native-image/baboon
+          file "$BIN"
           echo "=== ldd ==="
-          ldd baboon-compiler/.jvm/target/graalvm-native-image/baboon 2>&1 || true
+          ldd "$BIN" 2>&1 || true
           echo "=== smoke test ==="
-          baboon-compiler/.jvm/target/graalvm-native-image/baboon \
+          "$BIN" \
             --model-dir ./test/conv-test \
             :cs --output /tmp/baboon-validate-cs \
             :scala --output /tmp/baboon-validate-sc
@@ -80,7 +85,7 @@ jobs:
         with:
           name: baboon-${{ matrix.target }}
           path: |
-            baboon-compiler/.jvm/target/graalvm-native-image/**
+            bazel-bin/baboon-compiler/baboon-native-bin
 
   build-macos:
     strategy:
@@ -121,44 +126,32 @@ jobs:
           java-version: '${{ matrix.java-version }}'
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: 'sbt'
           native-image-job-reports: true
-      - name: Set up SBT
-        uses: sbt/setup-sbt@v1
-        with:
-          # The action's post step caches the sbt 2.x disk cache
-          # ($HOME/Library/Caches/sbt), which sbt 1.x never writes -- see
-          # project/build.properties. Building its key costs a whole-workspace
-          # hashFiles('**/*.sbt', '**/*.properties'), which by teardown has to walk every
-          # backend's generated code plus node_modules / cargo target / .dart_tool /
-          # Swift .build. That exceeds the 120s expression limit on the Intel runner (the
-          # slowest of the matrix at ~2h40m) and fails the job AFTER build, tests and
-          # artifact upload have all succeeded. Dependency caching is unaffected:
-          # graalvm/setup-graalvm above already does it via `cache: 'sbt'`.
-          disk-cache: false
       - name: Set up Dart SDK
         uses: dart-lang/setup-dart@v1
       - name: Set up Deno (runs worker.js in a module Worker, test-js-npm)
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.5.x
-      - name: Set up Rust 1.75
+      # Rust 1.90.0 to match MODULE.bazel + docs/bazel.md
+      # (1.75 is only the crates' MSRV floor).
+      - name: Set up Rust 1.90.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: '1.75'
+          toolchain: '1.90.0'
       - name: Build (macOS)
         run: |
           bazel build //...
           bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
       - name: Validate binary portability
         run: |
-          chmod +x baboon-compiler/.jvm/target/graalvm-native-image/baboon || true
           bazel build //baboon-compiler:baboon-native
+          chmod +x bazel-bin/baboon-compiler/baboon-native-bin
       - uses: actions/upload-artifact@v4
         with:
           name: baboon-${{ matrix.target }}
           path: |
-            baboon-compiler/.jvm/target/graalvm-native-image/**
+            bazel-bin/baboon-compiler/baboon-native-bin
 
   test-editors:
     name: test-editors
@@ -189,21 +182,23 @@ jobs:
             echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
           fi
       # Bazel builds the binary once and reuses it across both suites.
-      # Plain `nix develop --command` (no `--ignore-environment`): runner-injected
-      # env carries TLS trust chain that sbt-launcher needs for upstream Maven
-      # resolution. See defects.md [PR-29P.2-D01] for full root cause.
+      # The acceptance runners are plain stdlib python scripts invoked with
+      # the Bazel-built native binary; reports land under bazel-testlogs/
+      # (NOT the old sbt `target/` layout).
+      - name: Build baboon binary
+        run: nix develop --command bazel build //baboon-compiler:baboon-native
       - name: Run acceptance tests
-        run: nix develop --command bazel test //...
+        run: nix develop --command python3 test/acceptance/run_acceptance.py --baboon "$PWD/bazel-bin/baboon-compiler/baboon-native-bin" --target "$PWD/bazel-testlogs/acceptance"
       - name: Run service acceptance tests
-        run: nix develop --command bazel test //...
+        run: nix develop --command python3 test/acceptance/run_service_acceptance.py --baboon "$PWD/bazel-bin/baboon-compiler/baboon-native-bin" --target "$PWD/bazel-testlogs/service-acceptance"
       - name: Write step summary
         if: always()
         run: |
-          if [ -f ./target/acceptance/acceptance-summary.md ]; then
-            cat ./target/acceptance/acceptance-summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ./bazel-testlogs/acceptance/acceptance-summary.md ]; then
+            cat ./bazel-testlogs/acceptance/acceptance-summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ -f ./target/service-acceptance/service-summary.md ]; then
-            cat ./target/service-acceptance/service-summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f ./bazel-testlogs/service-acceptance/service-summary.md ]; then
+            cat ./bazel-testlogs/service-acceptance/service-summary.md >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload acceptance report
         uses: actions/upload-artifact@v4
@@ -211,12 +206,15 @@ jobs:
         with:
           name: acceptance-report
           path: |
-            target/acceptance/acceptance-report.html
-            target/acceptance/acceptance-results.json
-            target/acceptance/acceptance-summary.md
-            target/service-acceptance/service-report.html
-            target/service-acceptance/service-results.json
-            target/service-acceptance/service-summary.md
+            bazel-testlogs/acceptance/acceptance-report.html
+            bazel-testlogs/acceptance/acceptance-results.json
+            bazel-testlogs/acceptance/acceptance-summary.md
+            bazel-testlogs/service-acceptance/service-report.html
+            bazel-testlogs/service-acceptance/service-results.json
+            bazel-testlogs/service-acceptance/service-summary.md
+          # Fail loudly instead of silently uploading nothing when the
+          # runners above did not produce reports.
+          if-no-files-found: error
 
   validate-flake:
     strategy:
@@ -273,7 +271,6 @@ jobs:
           java-version: '${{ matrix.java-version }}'
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: 'sbt'
           native-image-job-reports: true
       - name: Install rsync
         # `choco install` exits 0 even when the community feed is unavailable
@@ -300,9 +297,11 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.5.x
-      - name: Set up Rust 1.75
+      # Rust 1.90.0 to match MODULE.bazel + docs/bazel.md
+      # (1.75 is only the crates' MSRV floor).
+      - name: Set up Rust 1.90.0
         shell: bash
-        run: rustup toolchain install 1.75 && rustup default 1.75
+        run: rustup toolchain install 1.90.0 && rustup default 1.90.0
       # Git Bash's C:\Program Files\Git\usr\bin holds a GNU coreutils `link.exe` that
       # shadows the MSVC linker, so the Rust `...-pc-windows-msvc` cargo lanes
       # link with the wrong `link.exe` and fail.
@@ -321,12 +320,13 @@ jobs:
         shell: bash
         run: |
           bazel build //...
+          bazel build //baboon-compiler:baboon-native
           bazel test //baboon-compiler/... //test/py-stub/... //test/rs-stub/...
       - uses: actions/upload-artifact@v4
         with:
           name: baboon-${{ matrix.target }}
           path: |
-            baboon-compiler/.jvm/target/graalvm-native-image/**
+            bazel-bin/baboon-compiler/baboon-native-bin
 
   publish-scala:
     runs-on:

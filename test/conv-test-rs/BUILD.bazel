@@ -1,0 +1,82 @@
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+
+package(default_visibility = ["//visibility:public"])
+
+# Generated crate layout: src/lib.rs pulls the compiler output in via
+# `#[path = "generated/mod.rs"] mod baboon_generated;`
+# (src/generated/ is gitignored; see test/conv-test-rs/.gitignore).
+# TODO: re-list CONV_GENERATED after the first codegen run so the action
+# declares every emitted file (same workflow as test/rs-stub/generated.bzl).
+CONV_GENERATED = [
+    "src/generated/mod.rs",
+]
+
+baboon_codegen(
+    name = "gen_conv",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--rs-write-evolution-dict=true",
+        "--rs-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "src/generated",
+    lang = ":rust",
+    model_dir = "test/conv-test",
+    models = "//test/conv-test:models",
+    output = "src/generated",
+    test_output = "src/generated",
+    outs = CONV_GENERATED,
+)
+
+CONV_DEPS = [
+    "@rs_stub_deps//:serde",
+    "@rs_stub_deps//:serde_json",
+    "@rs_stub_deps//:chrono",
+    "@rs_stub_deps//:uuid",
+    "@rs_stub_deps//:rust_decimal",
+    "@rs_stub_deps//:hex",
+    "@rs_stub_deps//:rand",
+]
+
+# crate_name matches what the binary and integration tests import
+# (baboon_conv_test_rs::...).
+rust_library(
+    name = "conv_test_rs",
+    srcs = ["src/lib.rs"] + CONV_GENERATED,
+    crate_features = [
+        "decimal",
+        "json-helpers",
+        "timestamps",
+        "uuids",
+    ],
+    crate_name = "baboon_conv_test_rs",
+    edition = "2021",
+    deps = CONV_DEPS,
+)
+
+# Cross-language wire-format acceptance binary (cargo parity: src/main.rs).
+rust_binary(
+    name = "conv_test",
+    srcs = ["src/main.rs"],
+    crate_features = [
+        "decimal",
+        "json-helpers",
+        "timestamps",
+        "uuids",
+    ],
+    edition = "2021",
+    deps = [":conv_test_rs"] + CONV_DEPS,
+)
+
+# Committed integration tests, one target per file (cargo parity).
+[
+    rust_test(
+        name = "test_" + f.replace("/", "_").replace(".rs", ""),
+        srcs = [f],
+        edition = "2021",
+        deps = [":conv_test_rs"] + CONV_DEPS,
+    )
+    for f in glob(["tests/*.rs"])
+]

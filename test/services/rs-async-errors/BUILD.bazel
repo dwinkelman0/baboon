@@ -1,0 +1,8 @@
+# Stub package for the Rust ASYNC regular-service wiring lane (errors flavour).
+# There are no .rs sources here yet: the compiler generates the async
+# petstore-errors service into a Cargo workspace copy at test time (see
+# README.md). Once the generated file set is pinned, wire it like
+# test/services/rs (baboon_codegen + rust_binary) against
+# //test/services:petstore_errors with --rs-async-services=true
+# --service-result-no-errors=false --service-result-type=Result.
+package(default_visibility = ["//visibility:public"])

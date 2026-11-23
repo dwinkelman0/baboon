@@ -1,0 +1,215 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//test/ts-stub:typescript/package_json.bzl", tsc_bin = "bin")
+load("@npm//test/ts-stub:vitest/package_json.bzl", vitest_bin = "bin")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(
+    ":generated.bzl",
+    "TS_GENERATED_MAIN",
+    "TS_GENERATED_MAIN_WRAPPED",
+    "TS_GENERATED_REVIEW",
+    "TS_GENERATED_REVIEW_RECORDS",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+# Links test/ts-stub's pnpm importer packages (typescript ~5.7.0, vitest ~3.0.0
+# from the workspace pnpm-lock.yaml) into bazel-bin for the lanes below.
+npm_link_all_packages(name = "node_modules")
+
+# Second model corpus for the ReviewTests lanes (mirrors the review corpus in
+# test/py-stub/BUILD.bazel, which regenerates from ReviewModels).
+filegroup(
+    name = "review_models",
+    srcs = glob(["ReviewModels/**"]),
+)
+
+# Main-corpus codegen, regular lane (mdl test-typescript-regular): definitions +
+# shared runtime into src/generated, generated codec tests into src/baboontests,
+# fixtures into src/baboontests-fixtures. The trio must stay siblings: generated
+# tests import their fixtures/runtime via computed relative paths.
+# Replaces the mdl test-gen-ts step (which generated into a target/ copy of this stub).
+baboon_codegen(
+    name = "gen_main",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--ts-write-evolution-dict=true",
+        "--ts-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "src/baboontests-fixtures",
+    lang = ":typescript",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = TS_GENERATED_MAIN,
+    output = "src/generated",
+    test_output = "src/baboontests",
+)
+
+# Wrapped lane (mdl test-typescript-wrapped): same models, ADT branches carry
+# wrapped codecs. Path layout is identical to the regular lane (verified by
+# diffing both codegen outputs); only the emitted contents differ.
+baboon_codegen(
+    name = "gen_main_wrapped",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--ts-write-evolution-dict=true",
+        "--ts-wrapped-adt-branch-codecs=true",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "src/baboontests-wrapped-fixtures",
+    lang = ":typescript",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = TS_GENERATED_MAIN_WRAPPED,
+    output = "src/generated-wrapped",
+    test_output = "src/baboontests-wrapped",
+)
+
+# ReviewModels codegen for the ReviewTests lanes. Hand-written
+# CollectionEvolution tests import from src/generated-review; RecordEvolution
+# (record mode) imports from src/generated-review-records.
+baboon_codegen(
+    name = "gen_review",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--ts-write-evolution-dict=true",
+        "--ts-wrapped-adt-branch-codecs=false",
+        "--ts-enum-lowercase-values=true",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "src/baboontests-review-fixtures",
+    lang = ":typescript",
+    model_dir = "test/ts-stub/ReviewModels",
+    models = ":review_models",
+    outs = TS_GENERATED_REVIEW,
+    output = "src/generated-review",
+    test_output = "src/baboontests-review",
+)
+
+baboon_codegen(
+    name = "gen_review_records",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--ts-write-evolution-dict=true",
+        "--ts-wrapped-adt-branch-codecs=false",
+        "--ts-enum-lowercase-values=true",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+        "--ts-maps-as-records=true",
+    ],
+    fixture_output = "src/baboontests-review-records-fixtures",
+    lang = ":typescript",
+    model_dir = "test/ts-stub/ReviewModels",
+    models = ":review_models",
+    outs = TS_GENERATED_REVIEW_RECORDS,
+    output = "src/generated-review-records",
+    test_output = "src/baboontests-review-records",
+)
+
+# Generated sources as JS libraries (no bundling; vitest transpiles per-file).
+js_library(
+    name = "ts_gen_main",
+    srcs = [":gen_main"],
+)
+
+js_library(
+    name = "ts_gen_main_wrapped",
+    srcs = [":gen_main_wrapped"],
+)
+
+js_library(
+    name = "ts_gen_review",
+    srcs = [
+        ":gen_review",
+        ":gen_review_records",
+    ],
+)
+
+# Hand-written runtime tests + configs. Kept separate from generated libs so
+# the runtime lanes stay green when only generated tests change.
+js_library(
+    name = "ts_stub_srcs",
+    srcs = glob(["src/runtime-tests/**/*.ts"]) + [
+        "package.json",
+        "tsconfig.json",
+        "tsconfig.typecheck.json",
+        "vitest.config.ts",
+    ],
+)
+
+# Lane 1 (mdl test-typescript-regular): hand-written runtime tests against the
+# main + review corpora. Self-contained: no cross-language fixture root needed.
+# Uses the vitest bin wrapper (bin_test) rather than a js_test whose
+# entry_point lives inside node_modules: the js_test entry creates an output
+# at node_modules/vitest/vitest.mjs which collides (prefix conflict) with the
+# node_modules/vitest link tree from npm_link_all_packages.
+vitest_bin.vitest_test(
+    name = "test_ts_runtime",
+    args = [
+        "run",
+        "--globals",
+        "src/runtime-tests",
+    ],
+    data = [
+        ":ts_gen_main",
+        ":ts_gen_review",
+        ":ts_stub_srcs",
+    ],
+)
+
+# Lane 2: generated codec tests (regular). Needs the cross-language fixture
+# root (populated by peer language lanes in mdl); under Bazel only TS exists
+# so far, so point it at an (empty) valid anchor: self-contained tests pass,
+# tests reading fixtures from other languages fail with a clear ENOENT until
+# those lanes land — same rationale as test_py_genpkg in test/py-stub.
+vitest_bin.vitest_test(
+    name = "test_ts_genpkg",
+    args = [
+        "run",
+        "--globals",
+        "src/baboontests",
+    ],
+    data = [
+        ":ts_gen_main",
+        ":ts_stub_srcs",
+    ],
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+)
+
+# Lane 3 (mdl test-typescript-wrapped): generated codec tests with wrapped ADT
+# branch codecs.
+vitest_bin.vitest_test(
+    name = "test_ts_genpkg_wrapped",
+    args = [
+        "run",
+        "--globals",
+        "src/baboontests-wrapped",
+    ],
+    data = [
+        ":ts_gen_main_wrapped",
+        ":ts_stub_srcs",
+    ],
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+)
+
+# Typecheck lane: mirrors the repo's `pnpm build` script
+# (tsc --noEmit -p tsconfig.typecheck.json), which covers src/runtime-tests,
+# src/generated, src/generated-review and src/generated-review-records.
+tsc_bin.tsc_test(
+    name = "test_ts_typecheck",
+    args = [
+        "--noEmit",
+        "-p",
+        "test/ts-stub/tsconfig.typecheck.json",
+    ],
+    data = [
+        ":node_modules",
+        ":ts_gen_main",
+        ":ts_gen_review",
+        ":ts_stub_srcs",
+    ],
+)

@@ -81,7 +81,7 @@ bazel test //...
 bazel build //...
 ```
 
-### Direct SBT Commands (for development)
+### Direct SBT Commands (for development — deprecated, use `bazel build //...`)
 ```bash
 # Compile the project
 sbt compile

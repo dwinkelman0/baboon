@@ -1,0 +1,72 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+
+package(default_visibility = ["//visibility:public"])
+
+# Fixture models live in test/rs-conversion-regression/models/ (v1/v2/any_adt);
+# the compiler emits the versioned `rust::conversion` modules plus the
+# evolution dict into a single output dir (mirrors test.sh's --output src/).
+# TODO: re-list REGRESSION_GENERATED after the first codegen run so the
+# action declares every emitted file (same workflow as
+# test/rs-stub/generated.bzl).
+REGRESSION_GENERATED = [
+    "gen/lib.rs",
+]
+
+baboon_codegen(
+    name = "gen_regression",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--generate-ueba-codecs=true",
+        "--generate-ueba-codecs-by-default=true",
+    ],
+    fixture_output = "gen",
+    lang = ":rust",
+    model_dir = "test/rs-conversion-regression/models",
+    models = ":models",
+    output = "gen",
+    test_output = "gen",
+    outs = REGRESSION_GENERATED,
+)
+
+filegroup(
+    name = "models",
+    srcs = glob(["models/*.baboon"]),
+)
+
+REGRESSION_DEPS = [
+    "@rs_stub_deps//:serde",
+    "@rs_stub_deps//:serde_json",
+    "@rs_stub_deps//:chrono",
+    "@rs_stub_deps//:uuid",
+    "@rs_stub_deps//:rust_decimal",
+    "@rs_stub_deps//:hex",
+    "@rs_stub_deps//:rand",
+]
+
+# crate_name matches what the integration test imports
+# (baboon_rs_conversion_regression::rust::conversion::...).
+rust_library(
+    name = "rs_conversion_regression",
+    srcs = [":gen_regression"],
+    crate_features = [
+        "decimal",
+        "json-helpers",
+        "timestamps",
+        "uuids",
+    ],
+    crate_name = "baboon_rs_conversion_regression",
+    edition = "2021",
+    deps = REGRESSION_DEPS,
+)
+
+# Committed integration tests, one target per file (cargo parity).
+[
+    rust_test(
+        name = "test_" + f.replace("/", "_").replace(".rs", ""),
+        srcs = [f],
+        edition = "2021",
+        deps = [":rs_conversion_regression"] + REGRESSION_DEPS,
+    )
+    for f in glob(["tests/*.rs"])
+]

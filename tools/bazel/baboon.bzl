@@ -14,14 +14,32 @@ regenerate the list then.
 def _baboon_codegen_impl(ctx):
     java_runtime = ctx.toolchains["@bazel_tools//tools/jdk:runtime_toolchain_type"].java_runtime
     outs = [ctx.actions.declare_file(f) for f in ctx.attr.outs]
+    if not outs:
+        fail("outs must not be empty for " + str(ctx.label))
+    # Execroot-relative directory of this package (e.g. .../bin/test/cs-stub).
+    # Output dirs are package-relative (e.g. "genlib/BaboonDefinitions/Generated").
+    pkg_marker = ctx.label.package + "/"
+    pkg_dir = outs[0].path[:outs[0].path.index(pkg_marker) + len(pkg_marker) - 1]
 
     def _dir_for(prefix):
-        marker = ctx.label.package + "/" + prefix + "/"
-        for f in outs:
-            idx = f.path.find(marker)
-            if idx >= 0:
-                return f.path[:idx + len(marker) - 1]
-        fail("no outputs under '" + prefix + "' for " + str(ctx.label))
+        return pkg_dir + "/" + prefix
+
+    # Optional post-copy: {dest: src}, both package-relative paths.
+    # Declares dest as an additional output copied from the (already declared)
+    # src after codegen runs. Used to fan a single generated file out into
+    # per-module dirs that must each compile their own copy (e.g. Swift's
+    # CrossLanguageFixturePath.swift, which test files expect as a same-module
+    # top-level declaration with no import).
+    copies = []
+    copy_cmds = []
+    for dest, src in ctx.attr.copy_files.items():
+        dest_file = ctx.actions.declare_file(dest)
+        copies.append(dest_file)
+        copy_cmds.append("cp {pkg}/{src} {dest}".format(
+            pkg = pkg_dir,
+            src = src,
+            dest = dest_file.path,
+        ))
 
     args = [
         java_runtime.java_executable_exec_path,
@@ -39,16 +57,16 @@ def _baboon_codegen_impl(ctx):
     ] + ctx.attr.extra_args
 
     ctx.actions.run_shell(
-        command = " ".join(args),
+        command = " ".join(args + copy_cmds),
         inputs = depset(
             [ctx.file.compiler_jar] + ctx.files.models,
             transitive = [java_runtime.files],
         ),
-        outputs = outs,
+        outputs = outs + copies,
         mnemonic = "BaboonCodegen",
         progress_message = "Baboon codegen %{label}",
     )
-    return [DefaultInfo(files = depset(outs))]
+    return [DefaultInfo(files = depset(outs + copies))]
 
 baboon_codegen = rule(
     implementation = _baboon_codegen_impl,
@@ -88,6 +106,10 @@ baboon_codegen = rule(
         "outs": attr.string_list(
             mandatory = True,
             doc = "Generated files, relative to the package.",
+        ),
+        "copy_files": attr.string_dict(
+            default = {},
+            doc = "Additional outputs copied from declared outputs: {dest: src}, both package-relative.",
         ),
     },
     toolchains = ["@bazel_tools//tools/jdk:runtime_toolchain_type"],

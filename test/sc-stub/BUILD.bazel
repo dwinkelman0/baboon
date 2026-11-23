@@ -1,0 +1,125 @@
+load("@rules_scala//scala:scala.bzl", "scala_library", "scala_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(":generated.bzl", "SC_GENERATED_LIB", "SC_GENERATED_TEST")
+
+package(default_visibility = ["//visibility:public"])
+
+# Baboon Scala codegen over the shared .baboon test corpus. Replaces the
+# mdl test-gen-regular-adt lane, which generated into a target/ copy of this stub.
+# Regenerates automatically whenever models or the compiler change; the file
+# set itself is pinned in generated.bzl (re-list when models change).
+#
+# NOTE (version skew, deliberate): test/sc-stub/build.sbt pins Scala 2.13.16,
+# scalatest 3.2.19 and circe 0.14.13, but this build reuses the single 2.13.18
+# toolchain from MODULE.bazel (rules_scala 7.4.1) and the maven labels, which
+# coursier resolves to the newer revisions also listed there (scalatest
+# 3.2.20, circe 0.14.16). Do NOT add a second Scala version for the stub.
+_SC_CODEGEN_FLAGS = [
+    "--sc-write-evolution-dict=true",
+    "--sc-wrapped-adt-branch-codecs=false",
+    "--generate-ueba-codecs-by-default=true",
+    "--generate-json-codecs-by-default=true",
+]
+
+baboon_codegen(
+    name = "gen_sc_lib",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = _SC_CODEGEN_FLAGS,
+    fixture_output = "gen/fixture",
+    lang = ":scala",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = SC_GENERATED_LIB,
+    output = "gen/main",
+    test_output = "gen/test",
+)
+
+baboon_codegen(
+    name = "gen_sc_test",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = _SC_CODEGEN_FLAGS,
+    fixture_output = "gen/fixture",
+    lang = ":scala",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = SC_GENERATED_TEST,
+    output = "gen/main",
+    test_output = "gen/test",
+)
+
+SC_DEPS = [
+    "@maven//:io_circe_circe_core_2_13",
+    "@maven//:io_circe_circe_generic_2_13",
+    "@maven//:io_circe_circe_parser_2_13",
+    "@maven//:io_circe_circe_numbers_2_13",
+    "@maven//:org_typelevel_cats_core_2_13",
+    "@maven//:org_typelevel_cats_kernel_2_13",
+    "@maven//:io_github_cquiroz_scala_java_time_2_13",
+    "@maven//:org_scalatest_scalatest_2_13",
+    "@maven//:org_scalatest_scalatest_flatspec_2_13",
+    "@maven//:org_scalatest_scalatest_funsuite_2_13",
+    "@maven//:org_scalatest_scalatest_core_2_13",
+    "@maven//:org_scalatest_scalatest_shouldmatchers_2_13",
+    "@maven//:org_scalatest_scalatest_matchers_core_2_13",
+    "@maven//:org_scalactic_scalactic_2_13",
+    "@maven//:org_scalatest_scalatest_compatible",
+]
+
+# Mirrors test/sc-stub/build.sbt scalacOptions (kind-projector syntax included).
+SCALAC_OPTS = [
+    "-Wconf:cat=other-match-analysis:error",
+    "-encoding",
+    "utf8",
+    "-deprecation",
+    "-feature",
+    "-unchecked",
+    "-language:experimental.macros",
+    "-language:higherKinds",
+    "-language:implicitConversions",
+    "-explaintypes",
+    "-Xsource:3-cross",
+    "-Wdead-code",
+    "-Wextra-implicit",
+    "-Wnumeric-widen",
+    "-Woctal-literal",
+    "-Wvalue-discard",
+    "-Wunused:_",
+    "-Wmacros:after",
+    "-Ycache-plugin-class-loader:always",
+    "-Ycache-macro-class-loader:last-modified",
+    "-Wconf:msg=nowarn:silent",
+    "-Wconf:any:error",
+    "-Wconf:cat=deprecation:warning",
+    "-Wconf:cat=optimizer:warning",
+    "-Wconf:cat=other-match-analysis:error",
+    "-Vtype-diffs",
+    "-P:kind-projector:underscore-placeholders",
+]
+
+# Generated definitions + runtime + fixtures, plus the hand-written
+# src/main tree. Generated codec tests live in :gen_sc_test and run under
+# :sc_stub_tests (mirrors the mdl layout where both end up on the test
+# classpath); see the skew NOTE above.
+scala_library(
+    name = "sc_stub",
+    srcs = [":gen_sc_lib"] + glob(["src/main/scala/**/*.scala"]),
+    plugins = ["@maven//:org_typelevel_kind_projector_2_13_18"],
+    scalacopts = SCALAC_OPTS,
+    deps = SC_DEPS,
+)
+
+# Generated codec suites plus hand-written specs (src/test/scala/runtime/*).
+# KeyCodecHostLastWinsSpec mutates process-global codec state, so suites must
+# not run in parallel; ScalaTest runs suites sequentially by default
+# (build.sbt also sets Test / parallelExecution := false).
+scala_test(
+    name = "sc_stub_tests",
+    srcs = [":gen_sc_test"] + glob(["src/test/scala/**/*.scala"]),
+    # Same cross-language fixture root override as the C#/Python/TS lanes:
+    # self-contained tests pass; tests reading peer-language fixtures fail
+    # with a clear error until those lanes land.
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+    plugins = ["@maven//:org_typelevel_kind_projector_2_13_18"],
+    scalacopts = SCALAC_OPTS,
+    deps = [":sc_stub"] + SC_DEPS,
+)

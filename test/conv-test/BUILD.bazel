@@ -1,0 +1,9 @@
+# Codegen inputs for the Rust conv-test lane (test/conv-test-rs/BUILD.bazel).
+# Kept as a filegroup so the Bazel codegen action stays hermetic.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "models",
+    srcs = glob(["*.baboon"]),
+)

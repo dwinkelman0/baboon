@@ -1,0 +1,9 @@
+node_modules
+test/ts-stub/node_modules
+target
+.js/target
+.jvm/target
+baboon-compiler/.js/target
+baboon-compiler/.jvm/target
+project/target
+project/project/target

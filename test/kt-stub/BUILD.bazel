@@ -1,0 +1,89 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(":generated.bzl", "KT_GENERATED_LIB", "KT_GENERATED_TEST")
+
+package(default_visibility = ["//visibility:public"])
+
+# Baboon Kotlin codegen over the shared .baboon test corpus (regular lane;
+# mirrors mdl test-gen-kotlin-regular). Regenerates automatically when models
+# or the compiler change; the file set is pinned in generated.bzl.
+baboon_codegen(
+    name = "gen_kt_lib",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--kt-write-evolution-dict=true",
+        "--kt-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "genkt-fixture",
+    lang = ":kotlin",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = KT_GENERATED_LIB,
+    output = "genkt-main",
+    test_output = "genkt-test",
+)
+
+baboon_codegen(
+    name = "gen_kt_test",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = [
+        "--kt-write-evolution-dict=true",
+        "--kt-wrapped-adt-branch-codecs=false",
+        "--generate-ueba-codecs-by-default=true",
+        "--generate-json-codecs-by-default=true",
+    ],
+    fixture_output = "genkt-fixture",
+    lang = ":kotlin",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    outs = KT_GENERATED_TEST,
+    output = "genkt-main",
+    test_output = "genkt-test",
+)
+
+KT_DEPS = [
+    "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_json",
+    "@maven//:org_jetbrains_kotlinx_kotlinx_serialization_core",
+    "@maven//:org_jetbrains_kotlin_kotlin_test",
+    "@maven//:org_jetbrains_kotlin_kotlin_test_junit5",
+    "@maven//:org_junit_jupiter_junit_jupiter_api",
+]
+
+kt_jvm_library(
+    name = "kt_lib",
+    srcs = [":gen_kt_lib"],
+    deps = KT_DEPS,
+)
+
+kt_jvm_library(
+    name = "kt_test_lib",
+    srcs = [":gen_kt_test"] + glob(["src/test/kotlin/**/*.kt"]),
+    # Friend-path to the lib (Gradle test-source-set semantics): internal
+    # members stay visible. Must NOT also appear in deps.
+    associates = [":kt_lib"],
+    deps = KT_DEPS,
+)
+
+# JUnit 5 console launcher bootstrap: --scan-classpath finds nothing on
+# Bazel's ambient classpath, so forward java.class.path explicitly.
+java_library(
+    name = "console_runner",
+    srcs = ["src/test/java/runner/ConsoleTestRunner.java"],
+    deps = ["@maven//:org_junit_platform_junit_platform_console_standalone"],
+)
+
+# JUnit 5 platform console launcher (mirrors `gradle test`).
+java_test(
+    name = "kt_tests",
+    env = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+    main_class = "runner.ConsoleTestRunner",
+    test_class = "runner.ConsoleTestRunner",
+    runtime_deps = [
+        ":console_runner",
+        ":kt_test_lib",
+        "@maven//:org_junit_platform_junit_platform_console_standalone",
+    ],
+)

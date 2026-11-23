@@ -35,25 +35,26 @@ bazel test //test/py-stub/...
 # GraalVM native-image (mirrors build.sbt graalVMNativeImageOptions):
 # --no-fallback, -H:-CheckToolchain, -H:+UnlockExperimentalVMOptions,
 # --enable-https, --enable-http, -march=compatibility,
-# plus --static --libc=musl on linux-amd64. Manual: needs GraalVM native-image.
+# plus --static --libc=musl on linux-amd64. Manual: needs GraalVM native-image
+# (see baboon-compiler/BUILD.bazel:105-128; JDK toolchain TODO at MODULE.bazel:168-180).
 bazel build //baboon-compiler:baboon-native
 ```
 
 ## Layout
 
 - `MODULE.bazel`: bzlmod module, Scala/Python/Rust/Java extensions, `maven.install` deps mirroring `build.sbt` (plus direct pins for transitive-only artifacts Bazel needs explicitly: `fundamentals-bio/basics/functoid/orphans`, `distage-core-api`, `izumi-reflect` + boopickle-shaded, `shapeless`, `sourcecode`, `data-class`, `case-app-util/annotations`, `cats-core/kernel`; `jline` via `http_jar` — see below).
-- `tools/bazel/baboon.bzl`: `baboon_codegen` rule. Runs the Baboon JVM compiler at build time and captures generated sources as explicit declared outputs. Replaces the mdl `test-gen-*` actions. Generated file sets are pinned in `test/rs-stub/generated.bzl`, `test/py-stub/py_generated_*.bzl` (re-list when models change).
+- `tools/bazel/baboon.bzl`: `baboon_codegen` rule. Runs the Baboon JVM compiler at build time and captures generated sources as explicit declared outputs. Replaced the deprecated mdl `test-gen-*` actions. Generated file sets are pinned in `test/rs-stub/generated.bzl`, `test/py-stub/py_generated_*.bzl` (re-list when models change).
 - `tools/bazel/py_unittest_discover.py`: `python -m unittest discover` equivalent that takes dotted package names (paths vary by config, names don't).
-- `baboon-compiler/BUILD.bazel`: single `scala_library :baboon` mirroring sbt's `baboonJVM` project (shared sources + `.jvm` platform sources; `.js` excluded — needs the Scala.js toolchain), `scala_binary :baboon-bin` (`main_class io.septimalmind.baboon.Baboon`), `filegroup :runtime_templates` + `:codegen_models`, genrule `:gen_runtime_resources` (replaces the izumi `PortableResource.embedSources` macro, which requires `build.sbt` on disk and fails under Bazel), manual genrule `:baboon-native`.
+- `baboon-compiler/BUILD.bazel`: single `scala_library :baboon` mirroring sbt's `baboonJVM` project (shared sources + `.jvm` platform sources; `.js` excluded — needs the Scala.js toolchain, see `baboon-compiler/BUILD.bazel:50-56`), `scala_binary :baboon-bin` (`main_class io.septimalmind.baboon.Baboon`), `filegroup :runtime_templates` + `:codegen_models`, genrule `:gen_runtime_resources` (replaces the izumi `PortableResource.embedSources` macro, which requires `build.sbt` on disk and fails under Bazel), manual genrule `:baboon-native`.
 - `scripts/BUILD.bazel`: `py_binary` targets `codegen`, `cross_version_compat`, `gen-big-model`, `gen_baboon_resources`.
-- `test/py-stub/BUILD.bazel`: codegen for the main corpus (`genmain/`) and the ReviewModels corpus (`genreview/`), `py_library` layers with `imports`, three `py_test` lanes mirroring mdl `test-python-regular` (GeneratedTests/pkg0, RuntimeTests, ReviewTests). `legacy_create_init = False` everywhere: auto-added `__init__.py` files would turn the split PEP-420 namespace packages (`BaboonTests/` across hand-written and generated roots) into regular packages, hiding one side.
+- `test/py-stub/BUILD.bazel`: codegen for the main corpus (`genmain/`) and the ReviewModels corpus (`genreview/`), `py_library` layers with `imports`, three `py_test` lanes mirroring the deprecated mdl `test-python-regular` lane (GeneratedTests/pkg0, RuntimeTests, ReviewTests). `legacy_create_init = False` everywhere: auto-added `__init__.py` files would turn the split PEP-420 namespace packages (`BaboonTests/` across hand-written and generated roots) into regular packages, hiding one side.
 - `test/rs-stub/BUILD.bazel`: codegen for the `:rust` lane, `rust_library :rs_stub` (crate `baboon_rs_stub`), per-file `rust_test` targets over committed `tests/`.
 
 ## Test status
 
 - `//test/rs-stub/...`: 23/23 pass.
 - `//test/py-stub:test_py_runtime`, `:test_py_review`: pass.
-- `//test/py-stub:test_py_genpkg`: builds; 52/104 tests pass. The 52 errors are all `test_*_produced_by_cs_codecs` tests reading C# golden fixtures (`BABOON_CROSS_LANG_FIXTURE_ROOT`), which don't exist until the C# lane is migrated (mdl runs that lane first via `dep action.test-cs-regular`). Self-contained tests pass.
+- `//test/py-stub:test_py_genpkg`: builds; 52/104 tests pass. The 52 errors are all `test_*_produced_by_cs_codecs` tests reading C# golden fixtures (`BABOON_CROSS_LANG_FIXTURE_ROOT`), which don't exist until the C# lane is migrated (the deprecated mdl lane ran that first via `dep action.test-cs-regular`). Self-contained tests pass.
 
 ## Bazel-vs-sbt dependency notes (strict deps)
 

@@ -1,0 +1,14 @@
+# Service contracts shared by all service-wiring lanes (incl. test/services/rs).
+# Kept as filegroups so Bazel codegen actions can declare hermetic inputs.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "petstore",
+    srcs = ["petstore.baboon"],
+)
+
+filegroup(
+    name = "petstore_errors",
+    srcs = ["petstore-errors.baboon"],
+)

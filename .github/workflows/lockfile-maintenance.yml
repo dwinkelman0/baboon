@@ -20,24 +20,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Refresh deps.lock.json
+      - name: Refresh lockfiles (Bazel/Bzlmod)
         run: |
           set -euo pipefail
-          DO_FLAKE_VALIDATE=1 nix develop --command mdl :flake-refresh
+          # NOTE: `mdl :flake-refresh` was removed with mdl (b1b004f).
+          # Bazel/Bzlmod is the primary build now; refresh its lockfile
+          # instead. `deps.lock.json` (nix-flake fallback) is no longer
+          # refreshed by this job.
+          nix develop --command bazel mod tidy
 
       - name: Commit lockfile update
         id: commit_lockfile
         run: |
           set -euo pipefail
-          if git diff --quiet -- deps.lock.json; then
+          if git diff --quiet -- MODULE.bazel.lock; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git config user.name "Baboon Lockfile Bot"
           git config user.email "lockfile-bot@users.noreply.github.com"
-          git add deps.lock.json
-          git commit -m "chore: refresh deps.lock.json"
+          git add MODULE.bazel.lock
+          git commit -m "chore: refresh MODULE.bazel.lock"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Push changes

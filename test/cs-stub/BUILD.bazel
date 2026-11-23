@@ -1,0 +1,113 @@
+load("@rules_dotnet//dotnet:defs.bzl", "csharp_library", "csharp_nunit_test", "import_library")
+load("//tools/bazel:baboon.bzl", "baboon_codegen")
+load(":generated.bzl", "CS_GENERATED_LIB", "CS_GENERATED_TEST")
+
+package(default_visibility = ["//visibility:public"])
+
+# Runs the Baboon compiler over the shared .baboon test corpus and captures
+# the generated C# sources as explicit declared outputs. Replaces the mdl
+# test-gen-cs lanes, which generated into a target/ copy of this stub.
+# Regenerates automatically whenever models or the compiler change; the file
+# set itself is pinned in generated.bzl (re-list when models change).
+#
+# Output dirs mirror the stub layout: definitions go to the netstandard2.1
+# library, tests+fixtures to the net9.0 test project. The compiler always
+# emits every product in a single run, but Bazel can only consume another
+# rule's outputs as a whole while lib/test need disjoint file sets, so the
+# compiler runs twice (fast, ~5s each) with disjoint declared outputs; each
+# action's undeclared files stay in the sandbox and are discarded.
+_CS_CODEGEN_FLAGS = [
+    "--cs-write-evolution-dict=true",
+    "--cs-wrapped-adt-branch-codecs=false",
+    "--generate-ueba-codecs-by-default=true",
+    "--generate-json-codecs-by-default=true",
+]
+
+baboon_codegen(
+    name = "gen_cs_lib",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = _CS_CODEGEN_FLAGS,
+    fixture_output = "gentest/BaboonTests/GeneratedFixtures",
+    lang = ":cs",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    output = "genlib/BaboonDefinitions/Generated",
+    outs = CS_GENERATED_LIB,
+    test_output = "gentest/BaboonTests/GeneratedTests",
+)
+
+baboon_codegen(
+    name = "gen_cs_test",
+    compiler_jar = "//baboon-compiler:baboon-bin_deploy.jar",
+    extra_args = _CS_CODEGEN_FLAGS,
+    fixture_output = "gentest/BaboonTests/GeneratedFixtures",
+    lang = ":cs",
+    model_dir = "baboon-compiler/src/test/resources/baboon",
+    models = "//baboon-compiler:codegen_models",
+    output = "genlib/BaboonDefinitions/Generated",
+    outs = CS_GENERATED_TEST,
+    test_output = "gentest/BaboonTests/GeneratedTests",
+)
+
+# NuGet DLLs (repos declared in the root MODULE.bazel) wrapped as .NET
+# references. Versions mirror BaboonDefinitions.csproj.
+# NOTE: these wrappers carry tags=["manual"]: the nuget :libs/:refs selects
+# only resolve under a target_framework transition from a consuming
+# csharp_* rule, so the wrappers cannot be built standalone (including via
+# //... wildcards) — but they build fine as deps. NUnit is deliberately NOT
+# wrapped: csharp_nunit_test brings its own NUnit+NUnitLite (see below).
+import_library(
+    name = "newtonsoft_json",
+    library_name = "Newtonsoft.Json",
+    libs = ["@nuget.newtonsoft.json//:libs"],
+    refs = ["@nuget.newtonsoft.json//:refs"],
+    tags = ["manual"],
+    version = "13.0.3",
+)
+
+import_library(
+    name = "collections_immutable",
+    library_name = "System.Collections.Immutable",
+    libs = ["@nuget.system.collections.immutable//:libs"],
+    refs = ["@nuget.system.collections.immutable//:refs"],
+    tags = ["manual"],
+    version = "9.0.0",
+)
+
+# Generated plus hand-written library sources (netstandard2.1, mirroring
+# BaboonDefinitions.csproj). Nullable annotations ride on the generated
+# `#nullable enable` pragmas and LangVersion-9-compatible code compiles
+# under the SDK default, so no extra compiler flags are set here.
+csharp_library(
+    name = "cs_definitions",
+    srcs = [":gen_cs_lib"] + glob(["BaboonDefinitions/**/*.cs"]),
+    target_frameworks = ["netstandard2.1"],
+    deps = [
+        ":collections_immutable",
+        ":newtonsoft_json",
+    ],
+)
+
+# Hand-written NUnit tests plus generated codec/fixture tests (net9.0,
+# mirroring BaboonTests.csproj). The NUnit runner is wired by
+# csharp_nunit_test itself (which brings its own NUnit+NUnitLite, currently
+# 3.14.0, plus a shim Main); Microsoft.NET.Test.Sdk/NUnit3TestAdapter are
+# `dotnet test` concerns and are not needed under Bazel. Our own :nunit
+# (3.13.2, mirroring the csproj) is intentionally NOT a dep here: mixing it
+# with the rule's built-in NUnit causes CS0433 duplicate-assembly errors.
+csharp_nunit_test(
+    name = "cs_tests",
+    srcs = [":gen_cs_test"] + glob(["BaboonTests/**/*.cs"]),
+    # Cross-language fixtures (produced by peer language lanes in mdl) do not
+    # exist under Bazel yet; point the resolver at an (empty) valid anchor so
+    # self-contained tests pass and only tests reading peer fixtures fail
+    # (with FileNotFoundException) until those lanes land. Mirrors the
+    # BABOON_CROSS_LANG_FIXTURE_ROOT override in the Python lanes.
+    envs = {"BABOON_CROSS_LANG_FIXTURE_ROOT": "."},
+    target_frameworks = ["net9.0"],
+    deps = [
+        ":collections_immutable",
+        ":cs_definitions",
+        ":newtonsoft_json",
+    ],
+)
