@@ -1,0 +1,27 @@
+// Parse-only study fixture for power.arch1 @2.0.0 (mirrors the
+// study_golden.py nominal point: 4 cores, mid V-f, activity 0.5, mid
+// intensity). Not executed: types and loaders are resolved by backends.
+using power.arch1 @"2.0.0"
+
+let op: OpPoint = OpPoint { voltage = 0.9, freq = 2.8e9, temp = 340.0 }
+let arch: Arch = Arch { cores = 4.0, cacheMB = 8.0, memCfg = "ddr5-1ch" }
+let workload: Workload = Workload { activity = 0.5, memIntensity = 0.5 }
+let scalars: Scalars = Scalars { ceffMult = 1.0, leakMult = 1.0, perfAdj = 1.0 }
+let leakPts: {LeakPoint} = CsvLoader(LeakPoint, rel:'leak.csv').map("voltage", .voltage).map("pleak", .pleak)
+let memPts: {MemPoint} = JsonLoader(MemPoint, rel:'mem.json').map("intensity", .intensity).map("meff", .meff)
+let vfPts: {VfPoint} = {VfPoint { voltage = 0.7, fmax = 1.6e9 }, VfPoint { voltage = 0.8, fmax = 2.2e9 }, VfPoint { voltage = 0.9, fmax = 2.8e9 }, VfPoint { voltage = 1.0, fmax = 3.4e9 }}
+let leak: LeakTable = LeakTable { points = leakPts }
+let mem: MemTable = MemTable { points = memPts }
+let vf: VfTable = VfTable { points = vfPts }
+let t_hot: f64 = leaf(340.0, {author = "dw"})
+let draft: ~SoC = SoC { op = op, arch = arch, workload = workload, scalars = scalars, leakTable = leak, memTable = mem, vfTable = vf, opsPerTask = 1.0e9, bytesPerTask = 4.0e9, bwPeak = 50.0e9, ipc = 2.0, baseCeff = 0.5e-9, pcap = 60.0, tmax = 360.0 }
+
+with provenance({model = "power.arch1", modelVersion = "2.0.0", dataVersion = "vf-v1+leak-v1+meff-v1", tool = "baboon"}) {
+  scalars.perfAdj = 1.0
+}
+
+for ((idx, row) in vfPts) {
+  let f: VfPoint = row
+}
+
+let base: SoC = draft.seal()

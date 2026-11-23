@@ -1,0 +1,12 @@
+// Parse-only derate study for power.arch1 @2.0.0: replays golden.bbin
+// with ceff/leak derated by 0.9x. Not executed: the import is resolved and
+// the partial SoC is sealed by backends.
+using power.arch1 @"2.0.0"
+import (base as g: ~SoC) from rel:'golden.bbin'
+
+with provenance({model = "power.arch1", modelVersion = "2.0.0", dataVersion = "derate-x0.9", tool = "baboon"}) {
+  g.scalars.ceffMult = 0.9
+  g.scalars.leakMult *= 0.9
+}
+
+let soc: SoC = g.seal()

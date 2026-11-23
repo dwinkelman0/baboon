@@ -3,6 +3,8 @@ package io.septimalmind.baboon
 import distage.DIKey
 import distage.ModuleDef
 import io.septimalmind.baboon.parser.BaboonParser
+import io.septimalmind.baboon.bbin.parser.{BbinParser, BbinParserImpl}
+import io.septimalmind.baboon.bbin.typer.{BbinTyper, BbinTyperImpl}
 import io.septimalmind.baboon.scheme.BaboonSchemeRenderer
 import io.septimalmind.baboon.translator.BaboonAbstractTranslator
 import io.septimalmind.baboon.translator.csharp.*
@@ -57,6 +59,8 @@ class BaboonModuleLogicModule[F[+_, +_]: Error2: MaybeSuspend2: TagKK](
   make[BaboonRules[F]].from[BaboonRules.BaboonRulesImpl[F]]
   make[BaboonParser[F]].from[BaboonParser.BaboonParserImpl[F]]
   make[BaboonTyper[F]].from[BaboonTyper.BaboonTyperImpl[F]]
+  make[BbinParser[F]].from[BbinParserImpl[F]]
+  make[BbinTyper[F]].from[BbinTyperImpl[F]]
   make[RootExtractor].from[RootExtractor.DeclaredRootExtractor].tagged(BaboonModeAxis.Compiler)
   make[RootExtractor].from[RootExtractor.DeclaredRootExtractor].tagged(BaboonModeAxis.Explorer)
   make[BaboonComparator[F]].from[BaboonComparator.BaboonComparatorImpl[F]]
