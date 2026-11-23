@@ -61,7 +61,7 @@ final class BbinImportResolverTest extends AnyWordSpec {
       assert(errors.isEmpty, s"expected no import errors, got: $errors")
     }
 
-    "accept sealed->sealed, sealed->partial and partial->partial" in {
+    "accept sealed->sealed, sealed->partial and partial->partial with Same/Unseal coercions" in {
       val target =
         "using p @1\nlet base: SoC = draft\nlet part: ~SoC = draft\n"
       val importerSealed =
@@ -74,6 +74,47 @@ final class BbinImportResolverTest extends AnyWordSpec {
       assert(BbinImportResolver.resolveAndCheck("t2.bbin", parseBbin(importerSealed), files.get).isEmpty)
       assert(BbinImportResolver.resolveAndCheck("t2.bbin", parseBbin(importerUnsealed), files.get).isEmpty)
       assert(BbinImportResolver.resolveAndCheck("t2.bbin", parseBbin(importerPartial), files.get).isEmpty)
+
+      val (sealedOk, _) = BbinImportResolver.resolve("t2.bbin", parseBbin(importerSealed), files.get)
+      assert(sealedOk.map(_.coercion) == List(BbinImportResolver.Coercion.Same))
+
+      val (unsealedOk, _) = BbinImportResolver.resolve("t2.bbin", parseBbin(importerUnsealed), files.get)
+      assert(unsealedOk.map(_.coercion) == List(BbinImportResolver.Coercion.Unseal))
+
+      val (partialOk, _) = BbinImportResolver.resolve("t2.bbin", parseBbin(importerPartial), files.get)
+      assert(partialOk.map(_.coercion) == List(BbinImportResolver.Coercion.Same))
+    }
+
+    "pass through the declared type when there is no ascription" in {
+      val target   =
+        "using p @1\nlet base: SoC = draft\nlet part: ~SoC = draft\n"
+      val importer =
+        "using p @1\nimport (base, part as q) from rel:'t.bbin'\nlet x: str = rel:'g'"
+      val files = Map("t.bbin" -> target)
+      val (resolved, errors) =
+        BbinImportResolver.resolve("i.bbin", parseBbin(importer), files.get)
+      assert(errors.isEmpty, s"expected no import errors, got: $errors")
+      assert(resolved.size == 2, s"expected two resolved imports, got: $resolved")
+      assert(resolved.map(_.coercion) == List(
+        BbinImportResolver.Coercion.Same,
+        BbinImportResolver.Coercion.Same,
+      ))
+      assert(resolved.map(_.resolvedType) == resolved.map(_.declared))
+      assert(resolved.map(_.name) == List("base", "part"))
+      assert(resolved.map(_.alias) == List(None, Some("q")))
+    }
+
+    "accept a partial->sealed ascription as a Seal coercion" in {
+      val target   = "using p @1\nlet part: ~SoC = draft\n"
+      val importer = "using p @1\nimport (part as q: SoC) from rel:'t.bbin'\nlet x: str = rel:'g'"
+      val files    = Map("t.bbin" -> target)
+      val (resolved, errors) =
+        BbinImportResolver.resolve("i.bbin", parseBbin(importer), files.get)
+      assert(errors.isEmpty, s"expected no import errors, got: $errors")
+      assert(resolved.size == 1, s"expected one resolved import, got: $resolved")
+      assert(resolved.head.coercion == BbinImportResolver.Coercion.Seal)
+      assert(resolved.head.declared == BbinType.Partial(socRef("SoC")))
+      assert(resolved.head.resolvedType == BbinType.Plain(socRef("SoC")))
     }
 
     "reject a row-type mismatch" in {
@@ -84,8 +125,8 @@ final class BbinImportResolverTest extends AnyWordSpec {
       assert(errors.head.contains("incompatible"), s"unexpected error: ${errors.head}")
     }
 
-    "reject a partial->sealed ascription without .seal()" in {
-      val target   = "using p @1\nlet part: ~SoC = draft\n"
+    "reject a partial->sealed set-shape mismatch" in {
+      val target   = "using p @1\nlet part: {SoC} = draft\n"
       val importer = "using p @1\nimport (part as q: SoC) from rel:'t.bbin'\nlet x: str = rel:'g'"
       val errors   = BbinImportResolver.resolveAndCheck("i.bbin", parseBbin(importer), Map("t.bbin" -> target).get)
       assert(errors.size == 1, s"expected one error, got $errors")

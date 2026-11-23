@@ -15,10 +15,12 @@ import izumi.fundamentals.collections.nonempty.NEString
   * checks the ascribed [[BbinType]] against the declared type per the
   * compatibility table:
   *
-  *  - sealed → sealed OK (same row type)
-  *  - sealed → `~` OK (unseal at import by copy — the imported binding is mutable)
-  *  - `~` → `~` OK (same row type)
-  *  - `~` → sealed REJECT (needs `.seal()`, never implicit)
+  *  - no ascription → identical type passthrough ([[Coercion.Same]])
+  *  - sealed → sealed OK, same row type ([[Coercion.Same]])
+  *  - sealed → `~` OK, unseal at import by copy ([[Coercion.Unseal]])
+  *  - `~` → `~` OK ([[Coercion.Same]])
+  *  - `~` → sealed OK here ([[Coercion.Seal]]); completeness enforced later
+  *    at seal planning/runtime, never rejected here
   *  - row-type mismatch REJECT
   *  - missing binding / missing file / unparsable target REJECT
   *
@@ -27,64 +29,151 @@ import izumi.fundamentals.collections.nonempty.NEString
   */
 object BbinImportResolver {
 
+  /** Seal variance of a resolved import ascription.
+    *
+    *  - [[Coercion.Same]]: no ascription (passthrough) or ascribed type is
+    *    identical to the declared type.
+    *  - [[Coercion.Unseal]]: sealed declaration ascribed `~` (implicit unseal
+    *    by copy, always valid).
+    *  - [[Coercion.Seal]]: `~` declaration ascribed sealed (implicit seal;
+    *    accepted here, completeness enforced later at seal planning/runtime).
+    */
+  sealed trait Coercion
+
+  object Coercion {
+    case object Same extends Coercion
+    case object Unseal extends Coercion
+    case object Seal extends Coercion
+  }
+
+  /** A successfully resolved import: the declared type in the target file,
+    * the effective (ascribed or passthrough) type, and the coercion between
+    * them.
+    */
+  final case class ResolvedImport(
+    name: String,
+    alias: Option[String],
+    declared: BbinType,
+    resolvedType: BbinType,
+    coercion: Coercion,
+    from: String,
+    targetFile: String,
+  )
+
+  /** Resolve all imports of `importer`, returning per-import results alongside
+    * a (possibly empty) error list. Errors cover missing files, unparsable
+    * targets, missing bindings and incompatible ascriptions.
+    */
+  def resolve(
+    importerPath: String,
+    importer: RawBbin,
+    read: String => Option[String],
+  ): (List[ResolvedImport], List[String]) = {
+    val (resolved, errors) = importer.imports.map { imp =>
+      val targetFile = resolveRel(importerPath, imp.from)
+      read(targetFile) match {
+        case None =>
+          (
+            Nil,
+            List(
+              s"import from rel:'${imp.from}': missing file '$targetFile' (resolved against '$importerPath')"
+            )
+          )
+        case Some(content) =>
+          parseTarget(targetFile, content) match {
+            case Left(err) =>
+              (Nil, List(err))
+            case Right(target) =>
+              imp.names.foldLeft((Nil: List[ResolvedImport], Nil: List[String])) {
+                case ((ok, errs), item) =>
+                  target.statements.collectFirst {
+                    case BbinStmt.LetStmt(l) if l.name == item.name => l
+                  } match {
+                    case None =>
+                      (
+                        ok,
+                        errs :+ s"import '${item.name}' from rel:'${imp.from}': missing binding '${item.name}' in '$targetFile'"
+                      )
+                    case Some(exported) =>
+                      item.ascribed match {
+                        case None =>
+                          (
+                            ok :+ ResolvedImport(
+                              item.name,
+                              item.alias,
+                              exported.tpe,
+                              exported.tpe,
+                              Coercion.Same,
+                              imp.from,
+                              targetFile,
+                            ),
+                            errs
+                          )
+                        case Some(ascribed) =>
+                          coercionFor(exported.tpe, ascribed) match {
+                            case Some(coercion) =>
+                              (
+                                ok :+ ResolvedImport(
+                                  item.name,
+                                  item.alias,
+                                  exported.tpe,
+                                  ascribed,
+                                  coercion,
+                                  imp.from,
+                                  targetFile,
+                                ),
+                                errs
+                              )
+                            case None =>
+                              (
+                                ok,
+                                errs :+ (
+                                  s"import '${item.name}' from rel:'${imp.from}': incompatible ascription " +
+                                    s"${render(ascribed)} for declared ${render(exported.tpe)} of '${item.name}' in '$targetFile'"
+                                )
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+      }
+    }.unzip
+    (resolved.flatten, errors.flatten)
+  }
+
   /** Check all imports of `importer`. Returns a (possibly empty) error list. */
   def resolveAndCheck(
     importerPath: String,
     importer: RawBbin,
     read: String => Option[String],
-  ): List[String] = {
-    importer.imports.flatMap { imp =>
-      val resolved = resolveRel(importerPath, imp.from)
-      read(resolved) match {
-        case None =>
-          List(s"import from rel:'${imp.from}': missing file '$resolved' (resolved against '$importerPath')")
-        case Some(content) =>
-          parseTarget(resolved, content) match {
-            case Left(err) =>
-              List(err)
-            case Right(target) =>
-              imp.names.flatMap { item =>
-                target.statements.collectFirst {
-                  case BbinStmt.LetStmt(l) if l.name == item.name => l
-                } match {
-                  case None =>
-                    List(
-                      s"import '${item.name}' from rel:'${imp.from}': missing binding '${item.name}' in '$resolved'"
-                    )
-                  case Some(exported) =>
-                    item.ascribed match {
-                      case None =>
-                        Nil
-                      case Some(ascribed) =>
-                        if (isCompatible(exported.tpe, ascribed)) Nil
-                        else
-                          List(
-                            s"import '${item.name}' from rel:'${imp.from}': incompatible ascription " +
-                              s"${render(ascribed)} for declared ${render(exported.tpe)} of '${item.name}' in '$resolved'"
-                          )
-                    }
-                }
-              }
-          }
-      }
-    }
-  }
+  ): List[String] =
+    resolve(importerPath, importer, read)._2
 
-  /** Compatibility table: sealed→sealed OK, sealed→~ OK, ~→~ OK,
-    * ~→sealed REJECT, anything else (row mismatch, set-shape mismatch) REJECT.
+  /** Compatibility table: sealed→sealed OK, sealed→~ OK (unseal),
+    * ~→~ OK, ~→sealed OK (seal; completeness enforced later),
+    * anything else (row mismatch, set-shape mismatch) REJECT.
     */
   def isCompatible(actual: BbinType, ascribed: BbinType): Boolean =
+    coercionFor(actual, ascribed).isDefined
+
+  /** Coercion between a declared type and its ascription, or `None` when the
+    * ascription is incompatible. Variance applies only to the `~` marker on
+    * the same row type; set shapes require exact equality.
+    */
+  def coercionFor(actual: BbinType, ascribed: BbinType): Option[Coercion] =
     (actual, ascribed) match {
-      case (BbinType.Plain(a), BbinType.Plain(b))     => a == b
-      case (BbinType.Plain(a), BbinType.Partial(b))   => a == b
-      case (BbinType.Partial(a), BbinType.Partial(b)) => a == b
-      case (BbinType.SetOf(a), BbinType.SetOf(b))     => a == b
+      case (BbinType.Plain(a), BbinType.Plain(b)) if a == b       => Some(Coercion.Same)
+      case (BbinType.Plain(a), BbinType.Partial(b)) if a == b     => Some(Coercion.Unseal)
+      case (BbinType.Partial(a), BbinType.Partial(b)) if a == b   => Some(Coercion.Same)
+      case (BbinType.Partial(a), BbinType.Plain(b)) if a == b     => Some(Coercion.Seal)
+      case (BbinType.SetOf(a), BbinType.SetOf(b)) if a == b       => Some(Coercion.Same)
       case (
             BbinType.IndexedSet(i1, t1, e1),
             BbinType.IndexedSet(i2, t2, e2),
-          ) =>
-        i1 == i2 && t1 == t2 && e1 == e2
-      case _ => false
+          ) if i1 == i2 && t1 == t2 && e1 == e2 =>
+        Some(Coercion.Same)
+      case _ => None
     }
 
   /** Resolve a `rel:` target against the importing file's directory. */
