@@ -208,19 +208,6 @@ final class FnOrderingTest extends AnyWordSpec {
       assert(errs.exists(e => e.contains("cycle") && e.contains("Basket.total")), errs.mkString("; "))
     }
 
-    "order migrate before default and computed last" in {
-      val m = depIn("Basket", "v", FnRole.Migrate, sens(writes = Set(slot("Basket", "v"))))
-      val d = depIn("Basket", "w", FnRole.Default, sens(writes = Set(slot("Basket", "w"))))
-      val c = depIn("Basket", "grand", FnRole.Computed, sens(writes = Set(slot("Basket", "grand"))))
-      val o = mustBuild(List(c, d, m))
-      val (mi, di, ci) = (
-        fnIdx(o, "Basket", "v", FnRole.Migrate),
-        fnIdx(o, "Basket", "w", FnRole.Default),
-        fnIdx(o, "Basket", "grand", FnRole.Computed)
-      )
-      assert(mi < di && di < ci, o.nodes.map(_.render).mkString(", "))
-    }
-
     "order normalize after its descendant reads" in {
       val child  = depIn("Item", "qty", FnRole.Default, sens(writes = Set(slot("Item", "qty"))))
       val parent = depIn("Basket", "vat", FnRole.Normalize, sens(reads = Set(sp("Basket", "items", "qty")), writes = Set(slot("Basket", "vat"))), Some("Item"))

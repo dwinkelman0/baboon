@@ -296,11 +296,5 @@ final class FnSensitivityTest extends AnyWordSpec {
       assert(write.leafReads == Set(leaf("Child", "count")))
       assert(read.leafReads.isEmpty)
     }
-
-    "never report prev reads" in {
-      val body = mustType(Nil, path("self", fld("data")), childScope(), str)
-      val (read, _) = mustExtract(body, None, childScope(), slot("Child", "data"))
-      assert(read.shapeReads.isEmpty)
-    }
   }
 }

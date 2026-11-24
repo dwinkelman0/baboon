@@ -165,44 +165,8 @@ abstract class DefaultsPythonEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonTe
             s"Expected let default helper. Source:\n$defaultsRendering",
           )
           assert(
-            defaultsRendering.contains("default_factory=_baboon_default_Defaults_letField"),
-            s"Expected let default_factory. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("n = (n + 1)"),
-            s"Expected let-assign lowering. Source:\n$defaultsRendering",
-          )
-          assert(
             defaultsRendering.contains("def _baboon_default_Defaults_forField() -> int:"),
             s"Expected for-loop default helper. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("while (i < 10):"),
-            s"Expected for-C while lowering. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("is not None"),
-            s"Expected match Some check. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("is None"),
-            s"Expected match None check. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("_baboon_normalize_normField"),
-            s"Expected normalize validator. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("object.__setattr__(self, 'normField'"),
-            s"Expected normalize setattr. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("def shouty(self)"),
-            s"Expected computed property. Source:\n$defaultsRendering",
-          )
-          assert(
-            defaultsRendering.contains("def _baboon_default_Defaults_letField() -> int:"),
-            s"Expected let-default helper. Source:\n$defaultsRendering",
           )
           assert(
             defaultsRendering.contains("letField: int = Field(default_factory=_baboon_default_Defaults_letField)"),

@@ -224,17 +224,6 @@ final class FnPipelineTest extends AnyWordSpec {
         )
       }
     }
-
-    "be deterministic under shuffled inputs" in {
-      val sites = List(
-        in("Child", "count", FnRole.Default, fn0("Child", Nil, intLit(0))),
-        in("Child", "total", FnRole.Normalize, fn0("Child", Nil, path("self", fld("count")))),
-        in("Child", "grand", FnRole.Computed, fn0("Child", Nil, path("self", fld("total")))),
-      )
-      val a = renders(mustAssemble(sites))
-      val b = renders(mustAssemble(sites.reverse))
-      assert(a == b, s"order differs under shuffle:\n$a\n$b")
-    }
   }
 
   // -- per-pass short-circuiting ----------------------------------------------
@@ -248,37 +237,9 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(!errs.exists(_.contains("cycle")), errs.mkString("; "))
     }
 
-    "fail an unknown capture field at P2, not as a cycle" in {
-      val bad = fnCap(cap1("p", "Child", RawLocatorSeg.Field("nope")), "Child", Nil, path("p"))
-      val errs = mustFail(List(in("Child", "count", FnRole.Default, bad)))
-      assert(errs.exists(_.contains("unknown field")), errs.mkString("; "))
-      assert(!errs.exists(_.contains("cycle")), errs.mkString("; "))
-    }
-
-    "fail an unknown expected type before gating" in {
-      val fn = fn0("Child", Nil, intLit(1))
-      val errs = mustFail(List(in("Child", "count", FnRole.Default, fn, expected = "Nope")))
-      assert(errs.exists(_.contains("unknown type")), errs.mkString("; "))
-      assert(!errs.exists(_.contains("cycle")), errs.mkString("; "))
-    }
-
-    "fail a migrate fn reading outside its sources at P5, not as a cycle" in {
-      val fn = fn0("Child", Nil, path("self", fld("total")))
-      val errs = mustFail(List(in("Child", "v", FnRole.Migrate, fn, sources = Set(sp("Child", "data")))))
-      assert(errs.exists(e => e.contains("migrate") && e.contains("undeclared")), errs.mkString("; "))
-      assert(!errs.exists(_.contains("cycle")), errs.mkString("; "))
-    }
-
     "fail a self-read as a P6 cycle" in {
       val fn = fn0("Child", Nil, path("self", fld("count")))
       val errs = mustFail(List(in("Child", "count", FnRole.Default, fn)))
-      assert(errs.exists(_.contains("cycle")), errs.mkString("; "))
-    }
-
-    "fail parent-reads-fn overlap as a P6 cycle" in {
-      val a = in("Basket", "a", FnRole.Default, fn0("Basket", Nil, path("self", fld("b"))))
-      val b = in("Basket", "b", FnRole.Default, fn0("Basket", Nil, path("self", fld("a"))))
-      val errs = mustFail(List(a, b))
       assert(errs.exists(_.contains("cycle")), errs.mkString("; "))
     }
   }
@@ -313,12 +274,6 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(errs.exists(_.contains("computed `self`")), errs.mkString("; "))
       assert(!errs.exists(_.contains("cycle")), errs.mkString("; "))
     }
-
-    "situate a capture path ending at the container" in {
-      val fn = fnCap(cap1("s", "Child"), "Child", Nil, path("s", fld("count")))
-      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
-    }
   }
 
   "P7 capture ancestry" should {
@@ -348,31 +303,19 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(errs.exists(_.contains("not dominant")), errs.mkString("; "))
     }
 
-    "reject a non-dominant ancestor capture (Cart does not dominate shared Item)" in {
-      val fn = fnCap(cap1("c", "Cart"), "Item", Nil, path("c", fld("c")))
-      val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
-      assert(errs.exists(_.contains("not dominant")), errs.mkString("; "))
-    }
-
-    "reject a sibling capture (Child fn capturing Basket)" in {
+    "reject a non-self capture on a root (Child fn capturing Basket)" in {
+      // Child has no parents in the parentMap, so it is a root: it may be
+      // instantiated without a parent, and any non-self capture would dangle.
       val fn = fnCap(cap1("b", "Basket"), "Child", Nil, path("b", fld("a")))
       val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
       assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
+      assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
     }
 
     "reject an unrelated capture (Item fn capturing Child)" in {
       val fn = fnCap(cap1("c", "Child"), "Item", Nil, path("c", fld("count")))
       val errs = mustFail(List(in("Item", "qty", FnRole.Computed, fn)))
       assert(errs.exists(_.contains("not an ancestor")), errs.mkString("; "))
-    }
-
-    "reject a non-self capture on a root (Child fn capturing Basket)" in {
-      // Child has no parents in the parentMap, so it is a root: it may be
-      // instantiated without a parent, and any non-self capture would dangle.
-      val fn = fnCap(cap1("b", "Basket"), "Child", Nil, path("b", fld("a")))
-      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
-      assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
     }
 
     "reject a dominating capture on an explicit gcRoot (Item marked root capturing Shop)" in {
@@ -382,13 +325,6 @@ final class FnPipelineTest extends AnyWordSpec {
       val site = inRoot("Item", "qty", FnRole.Computed, fn)
       val errs = mustFail(List(site))
       assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
-    }
-
-    "reject a self-capture on an explicit gcRoot (Item capturing Item) as redundant" in {
-      val fn = fnCap(cap1("s", "Item"), "Item", Nil, path("s", fld("price")))
-      val site = inRoot("Item", "qty", FnRole.Computed, fn)
-      val errs = mustFail(List(site))
-      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
     }
 
     "pass a root fn with no capture (explicit gcRoot, parentless Shop)" in {

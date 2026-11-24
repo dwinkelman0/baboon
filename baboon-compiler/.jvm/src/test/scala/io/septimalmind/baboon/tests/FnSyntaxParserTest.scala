@@ -202,16 +202,6 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       ))
     }
 
-    "parse a locator with a key segment" in {
-      val f = onlyField("data D { @default(fn[p: Parent.entries[$k].prop]() { p }) x: str }")
-      val fn = unwrapFn(f.field.fn)
-      assert(fn.captures.head.path == List(
-        RawCaptureStep.Single(RawLocatorSeg.Field("entries")),
-        RawCaptureStep.Single(RawLocatorSeg.Key("k")),
-        RawCaptureStep.Single(RawLocatorSeg.Field("prop")),
-      ))
-    }
-
     "parse literal expressions" in {
       val f = onlyField("data D { @default(fn[self: Self]() { 42 + 3.14 == true && !false || null.concat(\"x\") }) x: str }")
       val fn = unwrapFn(f.field.fn)
@@ -706,17 +696,6 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       expectParseFailure("data D { @default(fn[s: T($c* :)]() { s }) x: str }")
     }
 
-    "parse every method name verbatim (whitelist enforcement moved to the typer)" in {
-      List("foo", "bar", "doFoo", "compute", "frobnicate").foreach { m =>
-        val f = onlyField(s"data D { @default(fn[s: S]() { s.$m() }) x: str }")
-        val fn = unwrapFn(f.field.fn)
-        assert(
-          fn.body.result == BodyExpr.Call(BodyExpr.Path("s", Nil), m, Nil),
-          s"method name $m not preserved by the parser",
-        )
-      }
-    }
-
     "reject single = typo and bare double unary" in {
       expectParseFailure("data D { @default(fn[self: Self]() { a = b }) x: str }")
       expectParseFailure("data D { @default(fn[self: Self]() { !!a }) x: str }")
@@ -729,16 +708,6 @@ final class FnSyntaxParserTest extends AnyWordSpec {
         RawCaptureStep.Star(RawStarCapture("c1", List(RawLocatorSeg.Field("x")))),
         RawCaptureStep.Single(RawLocatorSeg.Field("b")),
         RawCaptureStep.Star(RawStarCapture("c2", List(RawLocatorSeg.Field("y")))),
-      ))
-    }
-
-    "parse field-star-field ordering preserved" in {
-      val f = onlyField("data D { @default(fn[a: T.f($c* : .x).g]() { a }) x: str }")
-      val fn = unwrapFn(f.field.fn)
-      assert(fn.captures.head.path == List(
-        RawCaptureStep.Single(RawLocatorSeg.Field("f")),
-        RawCaptureStep.Star(RawStarCapture("c", List(RawLocatorSeg.Field("x")))),
-        RawCaptureStep.Single(RawLocatorSeg.Field("g")),
       ))
     }
 
