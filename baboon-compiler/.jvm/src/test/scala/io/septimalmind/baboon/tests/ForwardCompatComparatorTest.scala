@@ -7,7 +7,6 @@ import io.septimalmind.baboon.typer.model.*
 import izumi.functional.bio.Error2
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 final class ForwardCompatComparatorTest extends ForwardCompatComparatorTestBase[Either]
@@ -26,11 +25,7 @@ abstract class ForwardCompatComparatorTestBase[F[+_, +_]: Error2: TagKK: BaboonT
   private val GUebaPrefixCompact  = ForwardGuarantee(Some(UebaRead.PrefixCompact), json = false)
 
   private def loadFwd(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("fwd-compat-ok")
-      .get
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("fwd-compat-ok")
     val baboons = IzFiles
       .walk(root.toFile)
       .toList

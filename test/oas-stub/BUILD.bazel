@@ -1,0 +1,17 @@
+# oas-stub: OpenAPI (validate.mjs) — no OpenAPI/Baboon oas rules in MODULE.bazel.
+# TODO: wire a real codegen/library lane once the toolchain exists.
+# Filegroups keep the package queryable (tags manual).
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "stub_files",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "conv_test_oas_stub",
+    srcs = [":stub_files"],
+    tags = ["manual"],
+)

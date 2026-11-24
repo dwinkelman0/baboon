@@ -1,0 +1,15 @@
+# Fixture-only overlay: no compilable sources, so a filegroup is the
+# complete Bazel wiring. Overlays are consumed as data by stub test lanes
+# (e.g. MCP/either/outcome/wiring variants); they must stay out of //...
+# builds via tags manual.
+# TODO: if an overlay gains compilable sources, promote it to a real
+# library target mirroring its parent stub.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "overlay_files",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)

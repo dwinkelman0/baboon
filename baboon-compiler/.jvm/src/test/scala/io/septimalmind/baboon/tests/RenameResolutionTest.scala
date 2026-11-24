@@ -7,7 +7,6 @@ import io.septimalmind.baboon.typer.model.{Owner, Pkg, TypeId, TypeName, Version
 import izumi.functional.bio.Error2
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 final class RenameResolutionTest extends RenameResolutionTestBase[Either]
@@ -51,11 +50,7 @@ abstract class RenameResolutionTestBase[F[+_, +_]: Error2: TagKK: BaboonTestModu
   }
 
   private def loadRenamePkg(loader: BaboonLoader[F]): F[NEList[BaboonIssue], io.septimalmind.baboon.typer.model.BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon/rename-ns")
-      .get
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("baboon/rename-ns")
     val baboons = IzFiles
       .walk(root.toFile)
       .toList

@@ -12,7 +12,6 @@ import io.septimalmind.baboon.typer.model.*
 import izumi.functional.bio.{Error2, F}
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 final class SchemeRoundtripTest extends SchemeRoundtripTestBase[Either]
@@ -185,11 +184,7 @@ abstract class SchemeRoundtripTestBase[F[+_, +_]: Error2: TagKK: BaboonTestModul
   }
 
   private def loadRenamePkg(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon/rename-ns")
-      .get
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("baboon/rename-ns")
     val baboons = IzFiles
       .walk(root.toFile)
       .toList

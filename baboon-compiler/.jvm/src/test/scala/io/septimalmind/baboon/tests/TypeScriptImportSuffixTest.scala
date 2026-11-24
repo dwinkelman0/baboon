@@ -10,7 +10,6 @@ import izumi.distage.testkit.model.TestConfig
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.NEString
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 
 /** With `--ts-import-suffix`, every relative import of every emitted TypeScript file ends in the
   * suffix — the static runtime files included — so the output resolves under Node16/NodeNext
@@ -76,7 +75,7 @@ final class TypeScriptImportSuffixTest extends BaboonTest[Either] {
   "TypeScript emission with an import suffix" should {
     "suffix every relative import, the runtime files' included" in {
       (loader: BaboonLoader[Either], translator: BaboonAbstractTranslator[Either]) =>
-        val root  = IzResources.getPath("mcp-stub-ok").get.asInstanceOf[IzResources.LoadablePathReference].path
+        val root  = TestResources.fixturePath("mcp-stub-ok")
         val files = IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
         for {
           family <- loader.load(files)

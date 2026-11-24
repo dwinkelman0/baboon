@@ -7,7 +7,6 @@ import io.septimalmind.baboon.typer.model.{BaboonFamily, Domain, DomainMember, O
 import izumi.functional.bio.{Error2, F}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 import java.nio.file.Path
@@ -41,11 +40,7 @@ final class M20AdtInheritanceFrontEndTest extends M20AdtInheritanceFrontEndTestB
 abstract class M20AdtInheritanceFrontEndTestBase[F[+_, +_]: Error2: TagKK: BaboonTestModule] extends BaboonTest[F] {
 
   private def resolveBaboonFiles(resourcePath: String): List[Path] = {
-    val root = IzResources
-      .getPath(resourcePath)
-      .getOrElse(throw new AssertionError(s"resource not found: $resourcePath"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath(resourcePath)
     if (root.toFile.isDirectory) {
       IzFiles
         .walk(root.toFile)

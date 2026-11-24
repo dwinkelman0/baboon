@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** With `deduplicate` on, a type whose schema is unchanged across versions is emitted once,
@@ -96,11 +95,7 @@ abstract class CSharpDedupServiceSignatureTestBase[F[+_, +_]: Error2: TagKK: Bab
   )
 
   private def loadFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("dedup-service-ok")
-      .getOrElse(throw new AssertionError("dedup-service-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("dedup-service-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

@@ -8,7 +8,6 @@ import io.septimalmind.baboon.typer.BaboonRuntimeCodec
 import io.septimalmind.baboon.typer.model.{BaboonFamily, Pkg, Version}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 
 import scala.util.Try
 
@@ -25,7 +24,7 @@ final class RuntimeCodecIntegerRangeTest extends BaboonTest[Either] {
     """{"a":127,"b":255,"c":32767,"d":65535,"e":2147483647,"u":4294967295,"f":"9223372036854775807","g":"18446744073709551615"}"""
 
   private def load(loader: BaboonLoader[Either]): BaboonFamily = {
-    val path  = IzResources.getPath("scheme-zip-ok/shapes").get.asInstanceOf[IzResources.LoadablePathReference].path
+    val path  = TestResources.fixturePath("scheme-zip-ok/shapes")
     val files = IzFiles.walk(path.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
     loader.load(files).fold(issues => fail(s"fixture failed to load: $issues"), identity)
   }

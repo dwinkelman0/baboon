@@ -1,4 +1,5 @@
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 load("//tools/bazel:baboon.bzl", "baboon_codegen")
 
 package(default_visibility = ["//visibility:public"])
@@ -70,3 +71,26 @@ rust_library(
     )
     for f in glob(["tests/*.rs"])
 ]
+
+# Cargo-parity wrapper for test.sh (gen rust -> `cargo test --test conversions`)
+# driven by the Bazel-built compiler. The hermetic equivalent is
+#   bazel test //test/rs-conversion-regression:test_tests_conversions
+# Tagged manual: shells out to cargo and needs crates.io access.
+filegroup(
+    name = "conversions_sh_fixtures",
+    srcs = ["Cargo.toml"] + glob([
+        "models/*.baboon",
+        "tests/*.rs",
+    ]),
+)
+
+sh_test(
+    name = "conversions_sh",
+    srcs = ["test.sh"],
+    args = ["$(location //baboon-compiler:baboon-bin)"],
+    data = [
+        ":conversions_sh_fixtures",
+        "//baboon-compiler:baboon-bin",
+    ],
+    tags = ["manual", "no-remote-exec", "requires-network"],
+)

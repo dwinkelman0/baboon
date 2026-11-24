@@ -9,7 +9,6 @@ import io.septimalmind.baboon.util.{Crc32, ZipReader}
 import io.septimalmind.baboon.{Baboon, BaboonLoader}
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -24,7 +23,7 @@ final class SchemeArchiveTest extends BaboonTest[Either] {
   private val Revert = Pkg(NEList("zipdemo", "revert"))
   private val Shapes = Pkg(NEList("zipdemo", "shapes"))
 
-  private def fixtureRoot: Path = IzResources.getPath("scheme-zip-ok").get.asInstanceOf[IzResources.LoadablePathReference].path
+  private def fixtureRoot: Path = TestResources.fixturePath("scheme-zip-ok")
 
   private def load(loader: BaboonLoader[Either]): BaboonFamily = {
     val files = IzFiles.walk(fixtureRoot.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

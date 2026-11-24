@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** Python @default emission test: verifies that `PyDefnTranslator` renders
@@ -78,11 +77,7 @@ abstract class DefaultsPythonEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonTe
   )
 
   private def loadDefaultsFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("defaults-ok/v1.baboon")
-      .getOrElse(throw new AssertionError("defaults-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("defaults-ok/v1.baboon")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

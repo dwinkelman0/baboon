@@ -27,6 +27,7 @@ bazel_dep(name = "rules_dart", version = "0.10.0")
 # NB: resolved to 3.1.2 by MVS (a transitive dep requires it over 2.5.0);
 # pin the resolved version so --check_direct_dependencies stays quiet.
 bazel_dep(name = "rules_swift", version = "3.1.2")
+bazel_dep(name = "rules_shell", version = "0.6.1")
 
 # --- Scala 2.13.18 ---
 scala_config = use_extension("@rules_scala//scala/extensions:config.bzl", "scala_config")

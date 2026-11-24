@@ -17,7 +17,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** T165 (G27): the OPERATIONAL Q43 proof that keep/drop is pure sugar.
@@ -192,11 +191,7 @@ abstract class T165AdtDeltaTwinAcceptanceTestBase[F[+_, +_]: Error2: TagKK: Babo
   )
 
   private def fixtureFiles(dir: String): List[java.nio.file.Path] = {
-    val root = IzResources
-      .getPath(dir)
-      .getOrElse(throw new AssertionError(s"fixture dir not found on test classpath: $dir"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath(dir)
     IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
   }
 

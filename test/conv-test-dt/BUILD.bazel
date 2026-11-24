@@ -1,0 +1,28 @@
+# Dart conv-test lane over test/conv-test models.
+# Deferred: no Dart toolchain in MODULE.bazel, so no baboon_codegen/library
+# target yet. Filegroups keep the lane queryable (tags manual).
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "conv_test_dt_models",
+    srcs = ["//test/conv-test:models"],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "conv_test_dt_sources",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+)
+
+# Aggregate lane target (keeps `bazel query //test/conv-test-dt/...` matching
+# `conv_test` until the compiled codegen lane lands).
+filegroup(
+    name = "conv_test",
+    srcs = [
+        ":conv_test_dt_models",
+        ":conv_test_dt_sources",
+    ],
+    tags = ["manual"],
+)

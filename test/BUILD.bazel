@@ -1,0 +1,15 @@
+# test package anchor. Conv-test lanes (test/conv-test-<lang>), stub lanes
+# (test/dt-stub, gql-stub, oas-stub), all *-overlay fixture dirs, and the
+# misc fixture dirs (editors, test-lsp, ueba-layout-regression,
+# ts-wiring-collision-stub) each carry their own BUILD.bazel (filegroup-based
+# where codegen is deferred). No remainder: every overlay dir has
+# :overlay_files. test/acceptance is owned by a sibling lane — do not add
+# targets here.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "test_anchor",
+    srcs = [],
+    tags = ["manual"],
+)

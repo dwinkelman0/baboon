@@ -9,7 +9,6 @@ import io.septimalmind.baboon.typer.model.*
 import izumi.functional.bio.Error2
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 import java.io.ByteArrayOutputStream
@@ -43,11 +42,7 @@ abstract class SchemeStdoutPurityTestBase[F[+_, +_]: Error2: TagKK: BaboonTestMo
       (loader: BaboonLoader[F], renderer: BaboonSchemeRenderer) =>
         // Resolve rename-ns's own subdir; it is self-contained so it doubles safely as both the
         // seam's input-walk root and its inclusion-resolver base.
-        val fixtureRoot = IzResources
-          .getPath("baboon/rename-ns")
-          .get
-          .asInstanceOf[IzResources.LoadablePathReference]
-          .path
+        val fixtureRoot = TestResources.fixturePath("baboon/rename-ns")
 
         val directoryInputs: Set[FSPath] =
           Set(FSPath.parse(NEString.unsafeFrom(fixtureRoot.toFile.getCanonicalPath)))

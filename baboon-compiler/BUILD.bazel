@@ -1,4 +1,4 @@
-load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_library")
+load("@rules_scala//scala:scala.bzl", "scala_binary", "scala_library", "scala_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -32,6 +32,37 @@ MAVEN_DEPS = [
     "@maven//:com_lihaoyi_sourcecode_2_13",
     # jline via http_jar (see MODULE.bazel): plain 4.4.5 jar, same as sbt.
     "@jline//jar",
+]
+
+# Test-only deps mirroring build.sbt % Test entries (scalatest 3.2.20,
+# distage-testkit-scalatest 1.3.0-M4, zio 2.1.24, json-schema-validator 3.0.7).
+# All artifacts are already pinned in MODULE.bazel's maven.install.
+MAVEN_TEST_DEPS = [
+    "@maven//:org_scalatest_scalatest_2_13",
+    "@maven//:org_scalatest_scalatest_flatspec_2_13",
+    "@maven//:org_scalatest_scalatest_funsuite_2_13",
+    "@maven//:org_scalatest_scalatest_core_2_13",
+    "@maven//:org_scalatest_scalatest_shouldmatchers_2_13",
+    "@maven//:org_scalatest_scalatest_matchers_core_2_13",
+    "@maven//:org_scalactic_scalactic_2_13",
+    "@maven//:org_scalatest_scalatest_compatible",
+    "@maven//:io_7mind_izumi_distage_testkit_scalatest_2_13",
+    # Transitive distage modules referenced directly by test sources
+    # (distage.plugins.PluginBase, izumi.distage.plugins.PluginConfig,
+    # izumi.distage.testkit.model.TestConfig); listed explicitly because
+    # the Scala toolchain enforces strict deps.
+    "@maven//:io_7mind_izumi_distage_framework_2_13",
+    "@maven//:io_7mind_izumi_distage_framework_api_2_13",
+    "@maven//:io_7mind_izumi_distage_extension_plugins_2_13",
+    "@maven//:io_7mind_izumi_distage_testkit_core_2_13",
+    # logstage-core carries izumi.logstage.api.Log (referenced by TestConfig);
+    # tools.jackson databind is json-schema-validator's Jackson 3 runtime.
+    "@maven//:io_7mind_izumi_logstage_core_2_13",
+    "@maven//:io_7mind_izumi_distage_extension_config_2_13",
+    "@maven//:tools_jackson_core_jackson_databind",
+    "@maven//:tools_jackson_core_jackson_core",
+    "@maven//:dev_zio_zio_2_13",
+    "@maven//:com_networknt_json_schema_validator",
 ]
 
 SCALAC_OPTS = [
@@ -74,6 +105,38 @@ scala_binary(
     runtime_deps = [":baboon"],
 )
 
+# Compiler unit tests, mirroring sbt's baboonJVM/test lane (the sbt test gap).
+# JVM platform test sources only; src/test/scala and .js/ carry no test files.
+# resources covers all of src/test/resources (including the .baboon corpus
+# also exposed as :codegen_models), so suites reading fixtures from the
+# classpath resolve the same files as under sbt.
+# ZipPath gap (fixed): suites resolved fixture dirs via
+# IzResources.getPath(...).asInstanceOf[LoadablePathReference].path + .toFile /
+# IzFiles.walk. Under sbt resources are loose files; under Bazel they are packed
+# in the test jar, so the path is a ZipPath and .toFile throws
+# UnsupportedOperationException. Shared helper TestResources (fixturePath/fixtureDir
+# in .jvm/src/test/scala/.../tests/TestResources.scala) now materializes
+# jar/zip trees to a temp dir when path.getFileSystem != FileSystems.getDefault,
+# and all LoadablePathReference call sites route through it (fast path unchanged
+# for file: URLs).
+# Parity gap (fixed): IdentifierRuntimeParityTest and TypeMetaCodecParityTest
+# read the compile-side BaboonRuntimeShared.scala from the source tree; it rides
+# along as :compile_sources data and the suites resolve it via
+# $TEST_SRCDIR/$TEST_WORKSPACE with an sbt-compatible cwd-walk fallback.
+scala_test(
+    name = "baboon_test",
+    srcs = glob([".jvm/src/test/scala/**/*.scala"]),
+    # Materialize the .baboon corpus as real runfiles files: several suites
+    # resolve fixture directories through the runfiles tree
+    # ($TEST_SRCDIR/_main/baboon-compiler/src/test/resources/baboon), which
+    # only exists when the filegroup rides along as data.
+    data = [":codegen_models", ":compile_sources"],
+    plugins = ["@maven//:org_typelevel_kind_projector_2_13_18"],
+    resources = glob(["src/test/resources/**"]),
+    scalacopts = SCALAC_OPTS,
+    deps = [":baboon"] + MAVEN_DEPS + MAVEN_TEST_DEPS,
+)
+
 filegroup(
     name = "runtime_templates",
     srcs = glob(["src/main/resources/baboon-runtime/**"]),
@@ -83,6 +146,16 @@ filegroup(
 filegroup(
     name = "codegen_models",
     srcs = glob(["src/test/resources/baboon/**"]),
+)
+
+# Compile-side Scala sources read directly by parity suites
+# (IdentifierRuntimeParityTest, TypeMetaCodecParityTest). Under sbt the suites
+# resolve them by walking up from the working directory; under Bazel the tests
+# run with a runfiles cwd, so the sources must ride along as `data` and the
+# suites resolve them via $TEST_SRCDIR/$TEST_WORKSPACE.
+filegroup(
+    name = "compile_sources",
+    srcs = ["src/main/scala/baboon/runtime/shared/BaboonRuntimeShared.scala"],
 )
 
 # Template files embedded into the compiler (replaces the izumi

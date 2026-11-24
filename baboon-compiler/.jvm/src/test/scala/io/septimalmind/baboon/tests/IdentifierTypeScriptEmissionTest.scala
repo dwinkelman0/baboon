@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** PR-57d emission test: runs the actual `TsDefnTranslator` pipeline against
@@ -83,11 +82,7 @@ abstract class IdentifierTypeScriptEmissionTestBase[F[+_, +_]: Error2: TagKK: Ba
   )
 
   private def loadIdentifierFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon/identifier-ok/identifiers.baboon")
-      .getOrElse(throw new AssertionError("identifier-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("baboon/identifier-ok/identifiers.baboon")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

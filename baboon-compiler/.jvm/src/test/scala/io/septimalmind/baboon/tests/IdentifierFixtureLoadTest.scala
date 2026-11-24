@@ -7,7 +7,6 @@ import io.septimalmind.baboon.typer.model.{BaboonFamily, DomainMember, Typedef}
 import izumi.functional.bio.{Error2, F}
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 
 import java.nio.file.Path
 
@@ -23,11 +22,7 @@ final class IdentifierFixtureLoadTest extends IdentifierFixtureLoadTestBase[Eith
 abstract class IdentifierFixtureLoadTestBase[F[+_, +_]: Error2: BaboonTestModule: izumi.reflect.TagKK] extends BaboonTest[F] {
 
   private def resolveBaboonFiles(resourcePath: String): List[Path] = {
-    val root = IzResources
-      .getPath(resourcePath)
-      .getOrElse(throw new AssertionError(s"resource not found: $resourcePath"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath(resourcePath)
     if (root.toFile.isDirectory) {
       IzFiles
         .walk(root.toFile)

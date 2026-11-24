@@ -10,7 +10,6 @@ import io.septimalmind.baboon.typer.BaboonComparator
 import io.septimalmind.baboon.typer.model.*
 import izumi.functional.bio.Error2
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 import java.io.ByteArrayOutputStream
@@ -66,11 +65,7 @@ abstract class DiffStdoutPurityTestBase[F[+_, +_]: Error2: TagKK: BaboonTestModu
         // Stage a private copy of pkg0 into <tmp>/pkg0 so the seam's single
         // directoryInputs set can serve BOTH as input-walk root (only pkg0's
         // *.baboon) AND as inclusion base (pkg0/pkg03-inclusion.bmo resolves).
-        val pkg0Src = IzResources
-          .getPath("baboon/pkg0")
-          .get
-          .asInstanceOf[IzResources.LoadablePathReference]
-          .path
+        val pkg0Src = TestResources.fixturePath("baboon/pkg0")
           .toFile
 
         val stageRoot = java.nio.file.Files.createTempDirectory("diff-stdout-purity-root-")

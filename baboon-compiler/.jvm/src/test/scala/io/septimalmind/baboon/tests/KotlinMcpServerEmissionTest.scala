@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** T14 codegen-shape test for the Kotlin MCP server generator.
@@ -87,11 +86,7 @@ abstract class KotlinMcpServerEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonT
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

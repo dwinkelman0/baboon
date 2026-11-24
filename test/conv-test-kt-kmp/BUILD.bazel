@@ -1,0 +1,35 @@
+# Kotlin KMP conv-test lane over test/conv-test models (cargo/mdl parity:
+# test/conv-test-kt-kmp/).
+# Mirrors test/kt-stub-kmp/BUILD.bazel (kt_jvm_library @rules_kotlin (+ --kt-multiplatform=true)) with model_dir="test/conv-test" and
+# models="//test/conv-test:models". Full baboon_codegen + compiled library
+# wiring is deferred until the generated file list is pinned (same workflow
+# as test/conv-test-rs/BUILD.bazel CONV_GENERATED TODO and the sibling
+# stub's generated.bzl): baboon_codegen requires explicit outs, so the
+# file set must come from a first codegen run. Until then these filegroups
+# keep the lane queryable and document the intended flags:
+# --kt-write-evolution-dict=true, --kt-wrapped-adt-branch-codecs=false, --kt-multiplatform=true + ueba/json codecs by default.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "conv_test_kt_kmp_models",
+    srcs = ["//test/conv-test:models"],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "conv_test_kt_kmp_sources",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+)
+
+# Aggregate lane target (keeps `bazel query //test/conv-test-kt-kmp/...` matching
+# `conv_test` until the compiled codegen lane lands).
+filegroup(
+    name = "conv_test",
+    srcs = [
+        ":conv_test_kt_kmp_models",
+        ":conv_test_kt_kmp_sources",
+    ],
+    tags = ["manual"],
+)

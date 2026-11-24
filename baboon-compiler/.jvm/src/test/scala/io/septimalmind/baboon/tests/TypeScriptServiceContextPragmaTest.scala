@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** Reproduction for the bug report: a model-level
@@ -85,11 +84,7 @@ abstract class TypeScriptServiceContextPragmaTestBase[F[+_, +_]: Error2: TagKK: 
   )
 
   private def loadCaseFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon-ctx/case-ctx")
-      .getOrElse(throw new AssertionError("case-ctx fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("baboon-ctx/case-ctx")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

@@ -7,7 +7,6 @@ import io.septimalmind.baboon.parser.model.issues.{BaboonIssue, IssuePrinter}
 import io.septimalmind.baboon.typer.{BaboonRuntimeEnvelopeCodec, BinEnvelopeOptions, BinEnvelopeVersion}
 import io.septimalmind.baboon.typer.model.BaboonFamily
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 
 /** `BaboonRuntimeEnvelopeCodec`: JSON <-> UEBA conversion of top-level envelopes over the interpreter.
   *
@@ -51,7 +50,7 @@ final class RuntimeEnvelopeCodecTest extends BaboonTest[Either] {
     val roots = List("baboon/fwd-e2e-ok", "baboon/fwd-e2e-chain-ok", "scheme-zip-ok/shapes")
     val files = roots.flatMap {
       root =>
-        val path = IzResources.getPath(root).get.asInstanceOf[IzResources.LoadablePathReference].path
+        val path = TestResources.fixturePath(root)
         IzFiles.walk(path.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
     }
     loader.load(files).fold(issues => fail(s"fixture failed to load: $issues"), identity)

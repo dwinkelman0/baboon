@@ -16,7 +16,6 @@ import izumi.distage.testkit.scalatest.Spec2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.{TagK, TagKK}
 
 abstract class BaboonTest[F[+_, +_]: TagKK: BaboonTestModule] extends Spec2[F]()(using BaboonTestModule[F].defaultModule, implicitly[TagKK[F]]) {
@@ -76,13 +75,9 @@ abstract class BaboonTest[F[+_, +_]: TagKK: BaboonTestModule] extends Spec2[F]()
   )
 
   def loadPkg(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon/pkg0")
-      .get
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixtureDir("baboon/pkg0")
     val baboons = IzFiles
-      .walk(root.toFile)
+      .walk(root)
       .toList
       .filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
     loader.load(baboons)

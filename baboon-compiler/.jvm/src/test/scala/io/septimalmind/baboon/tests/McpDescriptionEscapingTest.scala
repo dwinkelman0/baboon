@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** T127 codegen-shape RED-gate suite: asserts that the MCP description
@@ -144,11 +143,7 @@ abstract class CSharpMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Ba
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -241,11 +236,7 @@ abstract class RustMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Babo
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -336,11 +327,7 @@ abstract class KotlinMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Ba
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -463,11 +450,7 @@ abstract class JavaMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Babo
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -553,11 +536,7 @@ abstract class DartMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Babo
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -673,11 +652,7 @@ abstract class SwiftMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Bab
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -770,11 +745,7 @@ abstract class ScalaMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Bab
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -868,11 +839,7 @@ abstract class PythonMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK: Ba
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
@@ -965,11 +932,7 @@ abstract class TypeScriptMcpDescriptionEscapingTestBase[F[+_, +_]: Error2: TagKK
   )
 
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("mcp-stub-ok")
-      .getOrElse(throw new AssertionError("mcp-stub-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("mcp-stub-ok")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

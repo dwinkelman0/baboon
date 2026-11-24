@@ -1,0 +1,54 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Cross-language serialization + service acceptance runners (stdlib-only).
+# Mirrors the .github/workflows/baboon-build.yml acceptance-tests job, which runs:
+#   python3 test/acceptance/run_acceptance.py --baboon $PWD/bazel-bin/baboon-compiler/baboon-native-bin --target $PWD/bazel-testlogs/acceptance
+#   python3 test/acceptance/run_service_acceptance.py --baboon ... --target $PWD/bazel-testlogs/service-acceptance
+# Under Bazel the runners get the hermetic `//baboon-compiler:baboon-bin`
+# launcher via $(location) and write their reports under bazel-testlogs/
+# (TEST_UNDECLARED_OUTPUTS_DIR is exported for capture when run via `bazel test`).
+# Tagged manual: they build all 9 language lanes and take a long time, so they
+# stay out of wildcard builds/tests until every stub lane exists under Bazel.
+
+py_test(
+    name = "acceptance",
+    srcs = ["run_acceptance.py"],
+    args = [
+        "--baboon",
+        "$(location //baboon-compiler:baboon-bin)",
+        "--target",
+        "bazel-testlogs/acceptance",
+    ],
+    data = [
+        "//baboon-compiler:baboon-bin",
+        "//baboon-compiler:codegen_models",
+        "//test/services:petstore",
+    ],
+    main = "run_acceptance.py",
+    size = "enormous",
+    tags = ["manual", "no-remote-exec"],
+    timeout = "eternal",
+)
+
+py_test(
+    name = "service_acceptance",
+    srcs = ["run_service_acceptance.py"],
+    args = [
+        "--baboon",
+        "$(location //baboon-compiler:baboon-bin)",
+        "--target",
+        "bazel-testlogs/service-acceptance",
+    ],
+    data = [
+        "//baboon-compiler:baboon-bin",
+        "//baboon-compiler:codegen_models",
+        "//test/services:petstore",
+        "//test/services:petstore_errors",
+    ],
+    main = "run_service_acceptance.py",
+    size = "enormous",
+    tags = ["manual", "no-remote-exec"],
+    timeout = "eternal",
+)

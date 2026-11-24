@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** T13 codegen-shape regression guard for the per-language reserved-word
@@ -91,11 +90,7 @@ abstract class ReservedWordsScalaEmissionTestBase[F[+_, +_]: Error2: TagKK: Babo
   )
 
   private def loadReservedFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon/reserved-words-ok/reserved.baboon")
-      .getOrElse(throw new AssertionError("reserved-words-ok fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("baboon/reserved-words-ok/reserved.baboon")
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))

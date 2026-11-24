@@ -8,7 +8,6 @@ import io.septimalmind.baboon.translator.mcp.McpInputSchemaEmitter
 import io.septimalmind.baboon.translator.openapi.OasTypeTranslator
 import io.septimalmind.baboon.typer.model.*
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 
 import scala.jdk.CollectionConverters.*
 
@@ -37,7 +36,7 @@ final class MapKeyWireSchemaTest extends BaboonTest[Either] {
   }
 
   private def domain(loader: BaboonLoader[Either]): Domain = {
-    val root   = IzResources.getPath("map-keys-ok").get.asInstanceOf[IzResources.LoadablePathReference].path
+    val root   = TestResources.fixturePath("map-keys-ok")
     val files  = IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
     val family = loader.load(files).fold(issues => fail(s"fixture failed to load: $issues"), identity)
     family.domains.toMap.values.head.versions.toMap.values.head

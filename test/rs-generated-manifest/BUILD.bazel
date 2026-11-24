@@ -1,0 +1,25 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Cargo-parity wrapper for test.sh: generates the crate exactly as emitted
+# (with the compiler-generated Cargo.toml) for each supported edition
+# (default/2021/2024) and `cargo build`s each. The hermetic per-lane
+# equivalent is `bazel build //test/rs-stub/...`.
+# Tagged manual: shells out to cargo and needs crates.io access.
+
+filegroup(
+    name = "manifest_models",
+    srcs = glob(["models/*.baboon"]),
+)
+
+sh_test(
+    name = "manifest",
+    srcs = ["test.sh"],
+    args = ["$(location //baboon-compiler:baboon-bin)"],
+    data = [
+        ":manifest_models",
+        "//baboon-compiler:baboon-bin",
+    ],
+    tags = ["manual", "no-remote-exec", "requires-network"],
+)

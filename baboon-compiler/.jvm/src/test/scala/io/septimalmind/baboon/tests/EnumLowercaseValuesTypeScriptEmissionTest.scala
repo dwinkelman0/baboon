@@ -14,7 +14,6 @@ import izumi.functional.bio.Error2
 import izumi.functional.bio.unsafe.UnsafeInstances
 import izumi.fundamentals.collections.nonempty.{NEList, NEString}
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 /** D10 regression: under `enumLowercaseValues = true`, the enum member is DECLARED with the
@@ -85,11 +84,7 @@ abstract class EnumLowercaseValuesTypeScriptEmissionTestBase[F[+_, +_]: Error2: 
   )
 
   private def loadPkg0Family(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath("baboon/pkg0")
-      .getOrElse(throw new AssertionError("pkg0 fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath("baboon/pkg0")
     val baboons = IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
     loader.load(baboons)
   }

@@ -1,0 +1,19 @@
+# Scala MCP stub variant (build.sbt + src). Mirrors test/sc-stub/BUILD.bazel
+# (scala_library @rules_scala) with its own model corpus; full baboon_codegen
+# wiring deferred until the generated file list is pinned (see
+# test/sc-stub/generated.bzl workflow). Filegroups keep it queryable.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "overlay_files",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "conv_test_sc_mcp_sources",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+)

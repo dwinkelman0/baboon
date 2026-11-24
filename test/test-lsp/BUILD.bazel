@@ -1,0 +1,11 @@
+# LSP harness (node script + run-tests.sh). Fixture-only: filegroup keeps the package queryable.
+# TODO: promote to a real target if this gains compilable sources.
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "overlay_files",
+    srcs = glob(["**/*"], exclude = ["BUILD.bazel"]),
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)

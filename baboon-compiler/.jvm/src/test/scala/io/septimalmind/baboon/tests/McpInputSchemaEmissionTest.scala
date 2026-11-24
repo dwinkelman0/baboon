@@ -10,7 +10,6 @@ import io.septimalmind.baboon.typer.model.*
 import izumi.functional.bio.Error2
 import izumi.fundamentals.collections.nonempty.NEList
 import izumi.fundamentals.platform.files.IzFiles
-import izumi.fundamentals.platform.resources.IzResources
 import izumi.reflect.TagKK
 
 import scala.jdk.CollectionConverters.*
@@ -42,11 +41,7 @@ abstract class McpInputSchemaEmissionTestBase[F[+_, +_]: Error2: TagKK: BaboonTe
   private def loadStubFamily(loader: BaboonLoader[F]): F[NEList[BaboonIssue], BaboonFamily] = loadFixture(loader, "mcp-stub-ok")
 
   private def loadFixture(loader: BaboonLoader[F], fixture: String): F[NEList[BaboonIssue], BaboonFamily] = {
-    val root = IzResources
-      .getPath(fixture)
-      .getOrElse(throw new AssertionError(s"$fixture fixture not found"))
-      .asInstanceOf[IzResources.LoadablePathReference]
-      .path
+    val root = TestResources.fixturePath(fixture)
     val baboons =
       if (root.toFile.isDirectory)
         IzFiles.walk(root.toFile).toList.filter(p => p.toFile.isFile && p.toFile.getName.endsWith(".baboon"))
