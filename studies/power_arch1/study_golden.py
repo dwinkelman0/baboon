@@ -20,7 +20,7 @@ TOLS = {"perfW": sc.REL_TOL_PERFW}
 
 def main():
     soc = pm.SoC(**pm.golden_inputs())
-    got = soc.derived()
+    got = pm.derived(soc)
     got["teff_branch"] = "compute" if soc.tcomp <= soc.tmem else "memory"
 
     if "--freeze" in sys.argv or not os.path.exists(GOLDEN_FILE):
@@ -36,7 +36,7 @@ def main():
     rows = sc.check_row("golden", got, expected, TOLS)
     sc.emit("golden",
             {"desc": "nominal point", "inputs": {k: str(v) for k, v in pm.golden_inputs().items()
-                                                 if k not in ("leak_table", "mem_table", "vf_table")}},
+                                                 if k not in ("leakTable", "memTable", "vfTable")}},
             {"golden": got, "expected": expected})
     return sc.summarize(rows)
 

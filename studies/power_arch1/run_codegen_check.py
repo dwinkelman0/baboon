@@ -1,71 +1,70 @@
-"""Differential check: baboon `:python` codegen output vs the hand-lowered
-power_model.py oracle. Instantiates the golden row + one point per study in
-the GENERATED classes and requires exact agreement on all derived outputs.
+"""Facade check: power_model.py re-exports baboon `:python` codegen.
 
-Run from studies/power_arch1:  python3 run_codegen_check.py
+The old oracle-vs-codegen differential is gone by construction — the oracle
+*is* codegen now, so a field-by-field comparison would compare the generator
+against itself. Instead this pins what keeps the facade honest:
+  1. every re-exported symbol IS the generated class (no shadow copies);
+  2. pm.derived() agrees with direct property reads on every study point;
+  3. the golden derived row matches golden_expected.json.
+
+Run via `bazel run //studies/power_arch1:run_codegen_check` (imports resolve from `:soc-python`).
 """
 
+import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)          # makes `pygen.*` (generated) importable
-sys.path.insert(0, HERE)          # and the local study modules
-
 import power_model as pm
+import study_common as sc
 
-from pygen.power.arch1.Arch import Arch
-from pygen.power.arch1.LeakPoint import LeakPoint
-from pygen.power.arch1.LeakTable import LeakTable
-from pygen.power.arch1.MemPoint import MemPoint
-from pygen.power.arch1.MemTable import MemTable
-from pygen.power.arch1.OpPoint import OpPoint
-from pygen.power.arch1.PowerViolation import OverVoltage, PcapExceed, PowerViolation, TempExceed
-from pygen.power.arch1.Scalars import Scalars
-from pygen.power.arch1.SoC import SoC
-from pygen.power.arch1.VfPoint import VfPoint
-from pygen.power.arch1.VfTable import VfTable
-from pygen.power.arch1.Workload import Workload
+from power.arch1.Arch import Arch
+from power.arch1.LeakPoint import LeakPoint
+from power.arch1.LeakTable import LeakTable
+from power.arch1.MemPoint import MemPoint
+from power.arch1.MemTable import MemTable
+from power.arch1.OpPoint import OpPoint
+from power.arch1.PowerViolation import OverVoltage, PcapExceed, PowerViolation, TempExceed
+from power.arch1.RunProvenance import RunProvenance
+from power.arch1.Scalars import Scalars
+from power.arch1.SoC import SoC
+from power.arch1.VfPoint import VfPoint
+from power.arch1.VfTable import VfTable
+from power.arch1.Workload import Workload
 
-
-def gen_viol(v):
-    """Map the oracle's #Assertion payload to its generated pydantic variant."""
-    if isinstance(v, pm.TempExceed):
-        return TempExceed(temp=v.temp, tmax=v.tmax)
-    if isinstance(v, pm.OverVoltage):
-        return OverVoltage(voltage=v.voltage, fmax=v.fmax)
-    if isinstance(v, pm.PcapExceed):
-        return PcapExceed(ptotal=v.ptotal, pcap=v.pcap)
-    raise TypeError(f"unsupported violation payload: {v!r}")
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def gen_soc(inp):
-    return SoC(
-        op=OpPoint(voltage=inp["op"].voltage, freq=inp["op"].freq, temp=inp["op"].temp),
-        arch=Arch(cores=inp["arch"].cores, cacheMB=inp["arch"].cacheMB, memCfg=inp["arch"].memCfg),
-        workload=Workload(activity=inp["workload"].activity, memIntensity=inp["workload"].memIntensity),
-        scalars=Scalars(ceffMult=inp["scalars"].ceffMult, leakMult=inp["scalars"].leakMult,
-                        perfAdj=inp["scalars"].perfAdj),
-        leakTable=LeakTable(points=[LeakPoint(voltage=p.voltage, pleak=p.pleak) for p in inp["leak_table"].points]),
-        memTable=MemTable(points=[MemPoint(intensity=p.intensity, meff=p.meff) for p in inp["mem_table"].points]),
-        vfTable=VfTable(points=[VfPoint(voltage=p.voltage, fmax=p.fmax) for p in inp["vf_table"].points]),
-        opsPerTask=inp["ops_per_task"],
-        bytesPerTask=inp["bytes_per_task"],
-        bwPeak=inp["bw_peak"],
-        ipc=inp["ipc"],
-        baseCeff=inp["base_ceff"],
-        pcap=inp["pcap"],
-        tmax=inp["tmax"],
-        viol=gen_viol(inp["viol"]),
-    )
+def golden_file():
+    """Workspace-anchored golden file (HERE is runfiles-rooted under `bazel run`)."""
+    ws = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    if ws:
+        cand = os.path.join(ws, "studies", "power_arch1", "golden_expected.json")
+        if os.path.exists(cand):
+            return cand
+    return os.path.join(HERE, "golden_expected.json")
 
 
-def derived_of(g):
-    return {
-        "ceff": g.ceff, "pdyn": g.pdyn, "pleak": g.pleak, "meff": g.meff,
-        "tcomp": g.tcomp, "tmem": g.tmem, "teff": g.teff, "ptotal": g.ptotal,
-        "eop": g.eop, "perfW": g.perfW,
-    }
+GOLDEN_FILE = golden_file()
+TOLS = {"perfW": sc.REL_TOL_PERFW}
+
+REEXPORTS = {
+    "OpPoint": OpPoint,
+    "Arch": Arch,
+    "Workload": Workload,
+    "Scalars": Scalars,
+    "LeakPoint": LeakPoint,
+    "MemPoint": MemPoint,
+    "VfPoint": VfPoint,
+    "LeakTable": LeakTable,
+    "MemTable": MemTable,
+    "VfTable": VfTable,
+    "PowerViolation": PowerViolation,
+    "OverVoltage": OverVoltage,
+    "TempExceed": TempExceed,
+    "PcapExceed": PcapExceed,
+    "RunProvenance": RunProvenance,
+    "SoC": SoC,
+}
 
 
 def points():
@@ -85,17 +84,29 @@ def points():
 
 
 def main():
-    fails = 0
-    for name, inp in points().items():
-        ref = pm.SoC(**inp).derived()
-        got = derived_of(gen_soc(inp))
-        for k in ref:
-            ok = got[k] == ref[k]
-            if not ok:
-                fails += 1
-            print(f"  [{'PASS' if ok else 'FAIL'}] {name}.{k}: codegen={got[k]!r} oracle={ref[k]!r}")
-    print(f"== codegen-vs-oracle: {'ALL MATCH' if fails == 0 else f'{fails} MISMATCHES'} ==")
-    return 1 if fails else 0
+    rows = []
+
+    def verdict(name, ok, detail=""):
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name} {detail}")
+        rows.append((name, ok))
+
+    for name, cls in REEXPORTS.items():
+        verdict(f"reexport:{name}", getattr(pm, name) is cls)
+
+    for name, kw in points().items():
+        soc = pm.SoC(**kw)
+        d = pm.derived(soc)
+        for k, v in d.items():
+            verdict(f"derived:{name}.{k}", v == getattr(soc, k))
+
+    soc = pm.SoC(**pm.golden_inputs())
+    got = pm.derived(soc)
+    with open(GOLDEN_FILE) as f:
+        expected = json.load(f)
+    for r in sc.check_row("golden_file", got, {k: v for k, v in expected.items() if k != "teff_branch"}, TOLS):
+        rows.append(r)
+
+    return sc.summarize(rows)
 
 
 if __name__ == "__main__":

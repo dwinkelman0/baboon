@@ -24,7 +24,7 @@ def run_at(ceff, leak):
     kw = pm.golden_inputs()
     kw["scalars"] = pm.Scalars(ceffMult=ceff, leakMult=leak, perfAdj=1.0)
     soc = pm.SoC(**kw)
-    d = soc.derived()
+    d = pm.derived(soc)
     d["ceffMult"] = ceff
     d["leakMult"] = leak
     return d

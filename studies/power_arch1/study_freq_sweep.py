@@ -26,9 +26,9 @@ def main():
     for v, f in SWEEP:
         kw = dict(base)
         kw["op"] = pm.OpPoint(voltage=v, freq=f, temp=340.0)
-        kw["bytes_per_task"] = SWEEP_BYTES_PER_TASK
+        kw["bytesPerTask"] = SWEEP_BYTES_PER_TASK
         soc = pm.SoC(**kw)
-        d = soc.derived()
+        d = pm.derived(soc)
         d["voltage"] = v
         d["freq"] = f
         d["bound"] = "compute" if soc.tcomp <= soc.tmem else "memory"

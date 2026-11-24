@@ -23,7 +23,7 @@ def run_at_cores(cores):
     kw = pm.golden_inputs()
     kw["arch"] = pm.Arch(cores=cores, cacheMB=8.0, memCfg="ddr5-1ch")
     soc = pm.SoC(**kw)
-    d = soc.derived()
+    d = pm.derived(soc)
     d["cores"] = cores
     d["bound"] = "compute" if soc.tcomp <= soc.tmem else "memory"
     return d

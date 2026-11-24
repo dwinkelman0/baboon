@@ -8,8 +8,7 @@ import power_model as pm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Versioned model snapshot: the schema resolves via the models/latest symlink.
-# There is no live fallback — models/vX.Y.Z/soc.baboon is the single source.
+# Versioned snapshot via models/latest symlink; BUILD_WORKSPACE_DIRECTORY anchors the workspace root under `bazel run`.
 MODELS_DIR = os.path.join(HERE, "models")
 LATEST_LINK = os.path.join(MODELS_DIR, "latest")
 SCHEMA_SNAPSHOT = os.path.join(LATEST_LINK, "soc.baboon")
@@ -17,12 +16,20 @@ SCHEMA_SNAPSHOT = os.path.join(LATEST_LINK, "soc.baboon")
 
 def schema_path():
     """Versioned snapshot only; fail loudly if latest is missing."""
-    if not os.path.exists(SCHEMA_SNAPSHOT):
-        raise FileNotFoundError(
-            f"versioned schema snapshot missing: {SCHEMA_SNAPSHOT} "
-            "(models/latest symlink)"
+    ws = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    candidates = []
+    if ws:
+        candidates.append(
+            os.path.join(ws, "studies", "power_arch1", "models", "latest", "soc.baboon")
         )
-    return SCHEMA_SNAPSHOT
+    candidates.append(SCHEMA_SNAPSHOT)
+    for cand in candidates:
+        if os.path.exists(cand):
+            return cand
+    raise FileNotFoundError(
+        f"versioned schema snapshot missing: {candidates[0]} "
+        "(models/latest symlink)"
+    )
 
 REL_TOL_POWER = 1e-9   # power/energy: exact table lerp
 REL_TOL_PERFW = 1e-6   # perf/W division chain

@@ -1,0 +1,91 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("//tools/bazel:baboon.bzl", "baboon_file")
+
+package(default_visibility = ["//visibility:public"])
+
+# Bazel entry points for studies/power_arch1 (see README_BAZEL.md).
+# Studies are stdlib-only, so no pip hub is declared here.
+py_library(
+    name = "common",
+    srcs = [
+        "power_model.py",
+        "study_common.py",
+    ],
+    # "." puts this dir on sys.path so sibling imports resolve under `bazel run`.
+    imports = ["."],
+    deps = [
+        ":soc-python",
+        "@py_stub_deps//pydantic",
+    ],
+)
+
+# __file__ is runfiles-rooted under `bazel run`; inputs ride as data, outputs land ephemerally under bazel-bin.
+filegroup(
+    name = "study_data",
+    srcs = glob(["models/**"]) + ["golden_expected.json"],
+)
+
+# Codegen for the .baboon models via the shared baboon_file macro.
+baboon_file(
+    name = "soc",
+    model_dir = "models",
+    langs = ["python"],
+    output_dir = "baboon_gen",
+)
+
+py_binary(
+    name = "study_golden",
+    srcs = ["study_golden.py"],
+    data = [":study_data"],
+    main = "study_golden.py",
+    deps = [
+        ":common",
+        ":soc-python",
+    ],
+)
+
+py_binary(
+    name = "study_freq_sweep",
+    srcs = ["study_freq_sweep.py"],
+    data = [":study_data"],
+    main = "study_freq_sweep.py",
+    deps = [
+        ":common",
+        ":soc-python",
+    ],
+)
+
+py_binary(
+    name = "study_cores_plus1",
+    srcs = ["study_cores_plus1.py"],
+    data = [":study_data"],
+    main = "study_cores_plus1.py",
+    deps = [
+        ":common",
+        ":soc-python",
+    ],
+)
+
+py_binary(
+    name = "study_derate",
+    srcs = ["study_derate.py"],
+    data = [":study_data"],
+    main = "study_derate.py",
+    deps = [
+        ":common",
+        ":soc-python",
+    ],
+)
+
+# Differential oracle check against baboon `:python` codegen (imports resolve from `:soc-python`).
+py_binary(
+    name = "run_codegen_check",
+    srcs = ["run_codegen_check.py"],
+    data = [":study_data"],
+    main = "run_codegen_check.py",
+    deps = [
+        ":common",
+        ":soc-python",
+        "@py_stub_deps//pydantic",
+    ],
+)
