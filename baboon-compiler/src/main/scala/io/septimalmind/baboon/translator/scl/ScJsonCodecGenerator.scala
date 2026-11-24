@@ -197,7 +197,7 @@ class ScJsonCodecGenerator(
   }
 
   private def genDtoBodies(name: ScValue.ScType, d: Typedef.Dto): (TextTree[ScValue], TextTree[ScValue]) = {
-    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    // computed fields are no-wire, excluded from JSON key set.
     val fields = d.fields.filter(_.computed.isEmpty).map {
       f =>
         val escapedName = escapeScKeyword(f.name.name)
@@ -219,7 +219,7 @@ class ScJsonCodecGenerator(
       case _                                                      => mainEnc
     }
 
-    // prereq 4: computed fields are no-wire; wire emptiness/ctor use wire fields only.
+    // computed fields are no-wire; wire emptiness/ctor use wire fields only.
     val decoderForExpr =
       if (d.fields.filter(_.computed.isEmpty).nonEmpty) {
         q"""for {

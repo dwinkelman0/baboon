@@ -5,9 +5,7 @@ import io.septimalmind.baboon.typer.model.*
 final class UebaLayoutPlan(domain: Domain) {
   import UebaLayoutPlan.FieldLayout
 
-  // prereq 4: computed fields are eval-only (no-wire); they never occupy a UEBA
-  // positional slot, so the layout (field order / envelope / index count) is built
-  // from wire fields only.
+  // Computed fields are eval-only (no-wire): the layout is built from wire fields only.
   def fields(dto: Typedef.Dto): List[FieldLayout] =
     dto.fields.filter(_.computed.isEmpty).map(field => FieldLayout(field, domain.refMeta(field.tpe).len))
 

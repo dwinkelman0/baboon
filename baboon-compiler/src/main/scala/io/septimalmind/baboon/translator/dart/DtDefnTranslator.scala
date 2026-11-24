@@ -302,7 +302,7 @@ object DtDefnTranslator {
       val contractFieldNames = collectContractFieldNames(dto.contracts)
       val hasFields          = dto.fields.nonEmpty
 
-      // TODO defaults: Field.default ignored in v1
+      DefaultLiteralSupport.ignoreDefaults(dto)
       val fieldDeclarations = dto.fields.map {
         f =>
           val t              = domainTypes.asDtRef(f.tpe)

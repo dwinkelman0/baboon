@@ -126,7 +126,7 @@ class TsUEBACodecGenerator(
 
   private def dtoDec(dto: Typedef.Dto, name: TsType, fields: List[TextTree[TsValue]]): TextTree[TsValue] = {
     val indexCount = layout.indexedFields(dto).size
-    // prereq 4: computed fields are no-wire, skipped in UEBA positional codec.
+    // computed fields are no-wire, skipped in UEBA positional codec.
     val ctorFields = dto.fields.filter(_.computed.isEmpty).map {
       f =>
         q"${typeTranslator.escapeTsKeyword(f.name.name)},"

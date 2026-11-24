@@ -24,9 +24,7 @@ import FnTypes._
   */
 object FnBodyTyper {
 
-  /** Unit type for statement-position nodes without a value (`void`).
-    * Previously `bit` was reused as a placeholder; `void` is now explicit.
-    */
+  /** Unit type for statement-position nodes without a value. */
   val unitTpe: TypeRef = TypeRef.Scalar(TypeId.Builtins.void)
 
   /** Seed a fn scope from params plus P2 capture bindings. */
@@ -135,62 +133,52 @@ object FnBodyTyper {
     * dumping the whole root object; index expressions are recursed into so
     * paths used as indices (e.g. `i` in `element[i]`) are recorded too.
     */
+  /** Distinct `Path`s involved in an assert condition, in first-occurrence
+    * order, for backend trace metadata. Post-order for paths (index segments
+    * before the path itself, e.g. `i` before `element[i]`); everything else
+    * follows shared `TypedExpr.children` order (identical to the old walk).
+    */
   def collectAssertVars(cond: TypedExpr): List[TypedExpr.Path] = {
-    def go(e: TypedExpr, acc: List[TypedExpr.Path]): List[TypedExpr.Path] = e match {
-      case p @ TypedExpr.Path(_, segs, _) =>
-        val fromSegs = segs.collect { case TypedPathSeg.Index(idx, _) => idx }.foldLeft(acc)((a, idx) => go(idx, a))
-        if (fromSegs.contains(p)) fromSegs else fromSegs :+ p
-      case TypedExpr.Call(t, _, args, _)  => args.foldLeft(go(t, acc))((a, x) => go(x, a))
-      case TypedExpr.UserCall(t, _, args, _) => args.foldLeft(go(t, acc))((a, x) => go(x, a))
-      case TypedExpr.BinOp(_, l, r, _)    => go(r, go(l, acc))
-      case TypedExpr.UnaryOp(_, x, _)     => go(x, acc)
-      case TypedExpr.If(c, t, e, _)       => go(e, go(t, go(c, acc)))
-      case TypedExpr.Assign(t, v, _)      => go(v, go(t, acc))
-      case TypedExpr.ForIn(_, it, b, _)   => goBlock(b, go(it, acc))
-      case TypedExpr.ForC(init, c, s, b, _) =>
-        goBlock(b, go(s, go(c, go(init.value, acc))))
-      case TypedExpr.Match(s, arms, _) =>
-        arms.foldLeft(go(s, acc))((a, arm) => goBlock(arm.body, a))
-      case TypedExpr.Block(stmts, v, _) =>
-        val a2 = stmts.foldLeft(acc) {
-          case (a, TypedStmt.Let(_, _, x))  => go(x, a)
-          case (a, TypedStmt.Effect(x))    => go(x, a)
-          case (a, TypedStmt.Assert(asrt)) =>
-            val aCond = go(asrt.cond, a)
-            asrt.msg.foldLeft(aCond)((x, mm) => go(mm, x))
-        }
-        v.foldLeft(a2)((a, x) => go(x, a))
-      case TypedExpr.Lit(_, _) => acc
+    val seen = scala.collection.mutable.LinkedHashSet.empty[TypedExpr.Path]
+    def go(e: TypedExpr): Unit = e match {
+      case p: TypedExpr.Path =>
+        p.segments.collect { case TypedPathSeg.Index(idx, _) => idx }.foreach(go)
+        seen += p
+      case _ =>
+        TypedExpr.children(e).foreach(go)
     }
-    def goBlock(b: TypedExpr.Block, acc: List[TypedExpr.Path]): List[TypedExpr.Path] = go(b, acc)
-    go(cond, Nil)
+    go(cond)
+    seen.toList
   }
 
   /** Every assertion in a typed statement list, including ones nested in
-    * blocks, loops and match arms, in source order.
+    * blocks, loops and match arms, in source order. Statement-aware walk
+    * (`If` conds excluded, as before); child traversal is `TypedExpr.children`.
     */
   def collectAsserts(stmts: List[TypedStmt]): List[TypedAssert] = {
-    def fromExpr(e: TypedExpr): List[TypedAssert] = e match {
-      case TypedExpr.ForIn(_, _, b, _)    => fromBlock(b)
-      case TypedExpr.ForC(_, _, _, b, _)  => fromBlock(b)
-      case TypedExpr.Match(_, arms, _)    => arms.flatMap(a => fromBlock(a.body))
-      case TypedExpr.Block(ss, _, _)      => fromStmts(ss)
-      case TypedExpr.If(_, t, e, _)       => fromExpr(t) ++ fromExpr(e)
-      case TypedExpr.BinOp(_, l, r, _)    => fromExpr(l) ++ fromExpr(r)
-      case TypedExpr.UnaryOp(_, x, _)     => fromExpr(x)
-      case TypedExpr.Call(t, _, args, _)  => fromExpr(t) ++ args.flatMap(fromExpr)
-      case TypedExpr.UserCall(t, _, args, _) => fromExpr(t) ++ args.flatMap(fromExpr)
-      case TypedExpr.Assign(t, v, _)      => fromExpr(t) ++ fromExpr(v)
-      case _                              => Nil
+    val out = List.newBuilder[TypedAssert]
+    def stmt(s: TypedStmt): Unit = s match {
+      case TypedStmt.Assert(a) =>
+        out += a
+        expr(a.cond)
+        a.msg.foreach(expr)
+      case TypedStmt.Let(_, _, v) => expr(v)
+      case TypedStmt.Effect(e)    => expr(e)
     }
-    def fromBlock(b: TypedExpr.Block): List[TypedAssert] =
-      fromStmts(b.stmts) ++ b.value.toList.flatMap(fromExpr)
-    def fromStmts(ss: List[TypedStmt]): List[TypedAssert] = ss.flatMap {
-      case TypedStmt.Assert(a)  => List(a) ++ fromExpr(a.cond) ++ a.msg.toList.flatMap(fromExpr)
-      case TypedStmt.Let(_, _, v) => fromExpr(v)
-      case TypedStmt.Effect(e)  => fromExpr(e)
+    def block(b: TypedExpr.Block): Unit = {
+      b.stmts.foreach(stmt)
+      b.value.foreach(expr)
     }
-    fromStmts(stmts)
+    def expr(e: TypedExpr): Unit = e match {
+      case TypedExpr.If(_, t, el, _)     => expr(t); expr(el)
+      case TypedExpr.ForIn(_, _, b, _)  => block(b)
+      case TypedExpr.ForC(_, _, _, b, _) => block(b)
+      case TypedExpr.Match(_, arms, _)   => arms.foreach(a => block(a.body))
+      case b: TypedExpr.Block           => block(b)
+      case other                        => TypedExpr.children(other).foreach(expr)
+    }
+    stmts.foreach(stmt)
+    out.result()
   }
 
   // -- expressions ----------------------------------------------------------
@@ -328,8 +316,6 @@ object FnBodyTyper {
     segs.foldLeft(init) { (accR, seg) =>
       accR.flatMap { case (out, cur) =>
         seg match {
-          case BodyExpr.Segment.Variant(name) =>
-            fail(s"variant segment `$name` is only allowed in match patterns")
           case BodyExpr.Segment.Field(name) =>
             descendBodyField(name, cur, schema).map { case (t, _) =>
               (out :+ TypedPathSeg.Field(name, t), t)
@@ -355,11 +341,10 @@ object FnBodyTyper {
       case t if isOpt(t) =>
         elemType(t).toRight(List(s"cannot situate into $t")).flatMap(et => descendBodyField(name, et, schema))
       case t if isLst(t) || isSet(t) || isMap(t) =>
-        // Collection-valued field selected as a whole stays a collection;
-        // a `.field` chained onto it descends into the element type.
+        // A `.field` chained onto a collection descends into the element type.
         elemType(t).toRight(List(s"cannot situate into $t")).flatMap { et =>
           if (et == t) fail(s"no field `$name` on $t")
-          else descendBodyField(name, et, schema).orElse(collectionAsValue(name, t))
+          else descendBodyField(name, et, schema)
         }
       case t =>
         dtoFields(t, schema) match {
@@ -372,13 +357,6 @@ object FnBodyTyper {
         }
     }
   }
-
-  /** Fallback: the collection itself is the selected value (used only when
-    * element descent fails, so bare `self.map` keeps its `map` type).
-    * Implemented by the caller treating resolution failure as "keep".
-    */
-  private def collectionAsValue(name: String, t: TypeRef): Res[(TypeRef, String)] =
-    fail(s"unknown field `$name` on $t")
 
   private def indexInto(cur: TypeRef, idx: TypedExpr): Res[TypeRef] = cur match {
     case t if isLst(t) || isSet(t) =>
@@ -520,6 +498,10 @@ object FnBodyTyper {
   private def joinTypes(a: TypedExpr, b: TypedExpr, what: String): Res[TypeRef] =
     joinRefs(a.tpe, b.tpe, what, Some((a, b)))
 
+  /** Plain (non-literal) conformance: no int/float/null defaulting. */
+  private def conformsPlain(actual: TypeRef, expected: TypeRef): Boolean =
+    conforms(actual, LiteralKind.Plain, expected)
+
   private def joinRefs(a: TypeRef, b: TypeRef, what: String, exprs: Option[(TypedExpr, TypedExpr)] = None): Res[TypeRef] =
     if (a == b) ok(a)
     else
@@ -527,8 +509,8 @@ object FnBodyTyper {
         case Some((x, _)) if conformsLit(x, b) => ok(b)
         case Some((_, y)) if conformsLit(y, a) => ok(a)
         case _ =>
-          if (conforms(a, actualIsIntLit = false, actualIsFloatLit = false, actualIsNull = false, b)) ok(b)
-          else if (conforms(b, actualIsIntLit = false, actualIsFloatLit = false, actualIsNull = false, a)) ok(a)
+          if (conformsPlain(a, b)) ok(b)
+          else if (conformsPlain(b, a)) ok(a)
           else fail(s"$what: $a vs $b")
       }
 
@@ -581,10 +563,5 @@ object FnBodyTyper {
     case BodyLiteral.BoolLit(v)  => TypedExpr.Lit(TypedLit.BoolLit(v), TypedLit.BoolLit(v).tpe)
     case BodyLiteral.StrLit(v)   => TypedExpr.Lit(TypedLit.StrLit(v), TypedLit.StrLit(v).tpe)
     case BodyLiteral.NullLit     => TypedExpr.Lit(TypedLit.NullLit(), TypedLit.NullLit().tpe)
-  }
-
-  private def ownerName(t: TypeRef): String = t match {
-    case TypeRef.Scalar(id: TypeId.User) => id.name.name
-    case other                           => other.toString
   }
 }

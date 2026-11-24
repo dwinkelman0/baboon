@@ -299,7 +299,7 @@ object BaboonSchemeRenderer {
     ): Unit = {
       val derivations = renderClauses(member, domain)
       sb.append(s"$indent${rootPrefix}data ${dto.id.name.name}$derivations {\n")
-      // prereq 4: computed fields are no-wire; render wire fields first, then annotate
+      // computed fields are no-wire; render wire fields first, then annotate
       // computed separately so they never occupy a wire slot.
       dto.fields.filter(_.computed.isEmpty).foreach {
         field =>
@@ -416,7 +416,7 @@ object BaboonSchemeRenderer {
         contractId =>
           sb.append(s"$indent  is ${contractId.name.name}\n")
       }
-      // prereq 4: computed fields are no-wire; annotate separately.
+      // computed fields are no-wire; annotate separately.
       contract.fields.filter(_.computed.isEmpty).foreach {
         field =>
           val defaultPrefix = renderDefaultPrefix(field)
@@ -474,7 +474,7 @@ object BaboonSchemeRenderer {
               member.defn match {
                 case dto: Typedef.Dto =>
                   sb.append(s"$indent      data $role {\n")
-                  // prereq 4: computed fields are no-wire; annotate separately.
+                  // computed fields are no-wire; annotate separately.
                   dto.fields.filter(_.computed.isEmpty).foreach {
                     field =>
                       val defaultPrefix = renderDefaultPrefix(field)
@@ -505,7 +505,7 @@ object BaboonSchemeRenderer {
 
     private def renderDefaultPrefix(field: Field): String = {
       field.default match {
-        // prereq 4: Field(default=Fn) is eval-only and never reaches the codec/wire;
+        // Field(default=Fn) is eval-only and never reaches the codec/wire;
         // assert/skip so a fn literal is never emitted as a wire default.
         case Some(FieldDefault.Fn(_)) => sys.error(s"FieldDefault.Fn for ${field.name.name} is eval-only and must not reach scheme rendering")
         case Some(d)                   => s"@default($d) "

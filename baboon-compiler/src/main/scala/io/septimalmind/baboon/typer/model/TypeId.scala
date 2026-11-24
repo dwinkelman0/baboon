@@ -60,9 +60,8 @@ object TypeId {
     final val tso   = BuiltinScalar(TypeName("tso"))
     final val bytes = BuiltinScalar(TypeName("bytes"))
 
-    /** Valueless-statement result: loops, valueless blocks and `assert`.
-      * Previously `bit` was reused as a unit placeholder; `void` is now
-      * explicit so backends can distinguish "no value" from a real boolean.
+    /** Valueless-statement result (loops, valueless blocks, `assert`):
+      * `void` is a distinct unit type, not `bit`.
       */
     final val void = BuiltinScalar(TypeName("void"))
 

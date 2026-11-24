@@ -379,7 +379,7 @@ object JvDefnTranslator {
       mainMeta: List[JvDomainTreeTools.MetaField],
       codecMeta: Iterable[TextTree[JvValue]],
     ): DefnRepr = {
-      // TODO defaults: Field.default ignored in v1
+      DefaultLiteralSupport.ignoreDefaults(dto)
       val params = dto.fields.map {
         f =>
           val t         = domainTypes.asJvRef(f.tpe)

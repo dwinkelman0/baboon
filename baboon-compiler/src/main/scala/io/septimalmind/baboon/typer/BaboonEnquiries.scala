@@ -324,7 +324,7 @@ object BaboonEnquiries {
             // shape-preserving type produces the same shallowId and is classified as
             // Unchanged by BaboonComparator (wire formats are byte-identical).
             case d: Typedef.Dto =>
-              // prereq 4: computed fields are no-wire, so they are excluded from the id.
+              // computed fields are no-wire, so they are excluded from the id.
               val members = d.fields.filter(_.computed.isEmpty).map {
                 f =>
                   s"${f.name}:${wrap(f.tpe)}"
@@ -332,7 +332,7 @@ object BaboonEnquiries {
 
               s"[dto;${wrap(d.id)};$members]"
             case d: Typedef.Contract =>
-              // prereq 4: computed fields are no-wire, so they are excluded from the id.
+              // computed fields are no-wire, so they are excluded from the id.
               val members = d.fields.filter(_.computed.isEmpty).map {
                 f =>
                   s"${f.name}:${wrap(f.tpe)}"

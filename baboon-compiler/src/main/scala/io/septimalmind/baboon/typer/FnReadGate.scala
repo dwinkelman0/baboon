@@ -1,9 +1,8 @@
 package io.septimalmind.baboon.typer
 
 import io.septimalmind.baboon.typer.model._
-import io.septimalmind.baboon.typer.model.FnTypes._
 
-/** P5: read gate for context functions (standalone; not yet wired into `BaboonTranslator`).
+/** P5: read gate for context functions (wired via `FnPipeline.pass5`).
   *
   * Input: one [[Input]] per fn site — the extracted [[FnSite]], its typed body, the P4
   * [[Sensitivity]] and (for `migrate` only) the declared source set (`ReadTargets`).
@@ -157,17 +156,6 @@ object FnReadGate {
 
   // -- schema path validation (mirrors the P4 extractor walk) -------------------
 
-  private def resolvePath(schema: FnSchema, path: SchemaPath): Option[String] = {
-    if (schema.lookup(path.root.name.name).isEmpty)
-      return Some(s"unknown type: ${path.root.name.name}")
-    var cur: TypeRef = TypeRef.Scalar(path.root)
-    val it           = path.fieldNames.iterator
-    while (it.hasNext) {
-      SchemaPath.stepField(cur, it.next(), schema) match {
-        case Right((_, n)) => cur = n
-        case Left(m)       => return Some(m)
-      }
-    }
-    None
-  }
+  private def resolvePath(schema: FnSchema, path: SchemaPath): Option[String] =
+    SchemaPath.resolve(path.root, path.fieldNames, schema).left.toOption
 }

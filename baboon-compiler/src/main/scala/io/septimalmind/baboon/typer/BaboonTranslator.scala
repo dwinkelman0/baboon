@@ -110,23 +110,26 @@ class BaboonTranslator[F[+_, +_]: Error2](
     }.toList) { case (rawField, m, prop) =>
       for {
         tpe <- convertTpe(rawField.tpe, m)
-        fdefault <- rawField.default match {
-          case Some(RawDefaultValue.Fn(fn)) => shellPlaceholderFn(fn, tpe, m, id, FnRole.Default).map(d => Some(FieldDefault.Fn(d): FieldDefault))
-          case _                            => F.pure(None)
+        fdefault <- (rawField.fn, prop) match {
+          // First-class fn home: `@default(fn)` lives in `field.fn` (with
+          // `default = None`). `FnProperty` members carry their computed fn in
+          // the same slot — excluded here via `prop` (handled below).
+          case (Some(fn), None) => shellPlaceholderFn(fn, rawField.tpe, m, id, FnRole.Default).map(d => Some(FieldDefault.Fn(d): FieldDefault))
+          case _                 => F.pure(None)
         }
         normalize <- rawField.normalize match {
-          case Some(fn) => shellPlaceholderFn(fn, tpe, m, id, FnRole.Normalize).map(Some(_))
+          case Some(fn) => shellPlaceholderFn(fn, rawField.tpe, m, id, FnRole.Normalize).map(Some(_))
           case None     => F.pure(None)
         }
         migrate <- rawField.migrate match {
-          case Some(mig) => shellPlaceholderFn(mig.fn, tpe, m, id, FnRole.Migrate).map(fn => Some(TypedMigrate(fn)))
+          case Some(mig) => shellPlaceholderFn(mig.fn, rawField.tpe, m, id, FnRole.Migrate).map(fn => Some(TypedMigrate(fn)))
           case None      => F.pure(None)
         }
         computed <- prop match {
           case Some(p) =>
-            p.field.default match {
-              case Some(RawDefaultValue.Fn(fn)) => shellPlaceholderFn(fn, tpe, p.meta, id, FnRole.Computed).map(Some(_))
-              case _                            => F.pure(None)
+            p.field.fn match {
+              case Some(fn) => shellPlaceholderFn(fn, rawField.tpe, p.meta, id, FnRole.Computed).map(Some(_))
+              case None     => F.pure(None)
             }
           case None => F.pure(None)
         }
@@ -147,30 +150,26 @@ class BaboonTranslator[F[+_, +_]: Error2](
     * resolution (`checkUserCall`) works for not-yet-translated types; the body is a
     * dummy zero literal that is never lowered (shells are always overwritten by the
     * full translation before `out` is built).
+    *
+    * `Self` params rewrite role-dependently in the single home
+    * (`FnPipeline.selfFor`) before conversion: a bare `Self` must NOT go
+    * through `convertTpe` directly (ScopeSupport has no `Self` binding and
+    * fails with UnexpectedNonBuiltin). `Computed`/`Migrate` self is the
+    * enclosing container (owner); `Default`/`Normalize` self is the field value.
     */
   private def shellPlaceholderFn(
     fn: RawFn,
-    expected: TypeRef,
+    expectedRaw: RawTypeRef,
     meta: RawNodeMeta,
     owner: TypeId.User,
     role: FnRole,
   ): F[NEList[BaboonIssue], model.TypedFn] = {
-    // Mirror of `FnPipeline.selfFor`: a bare `Self` param must NOT go through
-    // `convertTpe` (ScopeSupport has no `Self` binding and fails with
-    // UnexpectedNonBuiltin). `Computed`/`Migrate` self is the enclosing
-    // container (owner); `Default`/`Normalize` self is the field value.
-    F.traverseAccumErrors(fn.params.toList) { p =>
-      p.tpe match {
-        case RawTypeRef.Simple(n, _) if n.name == "Self" =>
-          val selfTpe = role match {
-            case FnRole.Computed | FnRole.Migrate   => TypeRef.Scalar(owner)
-            case FnRole.Default | FnRole.Normalize => expected
-          }
-          F.pure((p.name, selfTpe))
-        case other =>
-          convertTpe(other, meta).map(t => (p.name, t))
+    for {
+      expected <- convertTpe(expectedRaw, meta)
+      ps <- F.traverseAccumErrors(fn.params.toList) { p =>
+        convertTpe(FnPipeline.selfFor(role, owner.name.name, expectedRaw, p.tpe), meta).map(t => (p.name, t))
       }
-    }.map { ps =>
+    } yield {
       val zero = expected match {
         case TypeRef.Scalar(b) if b == TypeId.Builtins.bit => model.TypedLit.BoolLit(false)
         case t if model.FnTypes.isFloat(t)                 => model.TypedLit.FloatLit(0.0)
@@ -294,8 +293,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     * The owner stub carries the FULL sibling field list
     * (via `fnSchemaForAll`), not just the single field under conversion, so
     * computed/default/normalize/migrate fns can read sibling fields through
-    * `self`. Previously only the current field was visible and any
-    * multi-field fn body failed resolution. Sibling entries are type-level
+    * `self`. Sibling entries are type-level
     * only (no defaults); the merged stub dedupes by name preferring the
     * current field.
     */
@@ -319,13 +317,35 @@ class BaboonTranslator[F[+_, +_]: Error2](
     FnSchema(fromDefined + (stub.id.name.name -> stub), adts)
   }
 
-  /** Full-field owner stub. `stub` is the field under
-    * conversion; `siblings` are pre-converted type-level fields of the same
-    * DTO (see `siblingStubs` in `convertDto`). */
-  private def fnSchemaForAll(owner: TypeId.User, stub: Field, siblings: Seq[Field]): FnSchema = {
-    val merged = stub +: siblings.filterNot(_.name == stub.name).toList
-    fnSchemaFor(Typedef.Dto(owner, merged, Nil))
+  /** Full-field owner schema for fn assembly. Built ONCE per DTO in
+    * `convertDto` (the only place that knows `isRoot`): `fields` are the
+    * pre-converted type-level sibling fields (see `siblingStubs`), so fn
+    * bodies can resolve `self.<sibling>` — the owner is not in `defined`
+    * yet. Sibling entries are type-level only (no defaults). Rootness rides
+    * in `FnSchema.roots` (projected from `DomainMember.User.isRoot`), so no
+    * `ownerIsRoot` flag threads through the per-field converters below —
+    * they just receive the schema.
+    */
+  private def fnSchemaForAll(owner: TypeId.User, fields: Seq[Field], isRoot: Boolean): FnSchema = {
+    val roots: Set[String] = if (isRoot) Set(owner.name.name) else Set.empty
+    fnSchemaFor(Typedef.Dto(owner, fields.toList, Nil)).copy(roots = roots)
   }
+
+  /** Prepend the field under conversion ahead of the DTO-level base fields
+    * (the old per-field stub-first shape, so a field absent from the base —
+    * e.g. an intersection-limiter field that is not a member — still
+    * resolves its own type). Roots ride along untouched.
+    */
+  private def withFieldStub(schema: FnSchema, owner: TypeId.User, stub: Field): FnSchema =
+    schema.types.get(owner.name.name) match {
+      case Some(d: Typedef.Dto) =>
+        val merged = stub +: d.fields.filterNot(_.name == stub.name)
+        schema.copy(types = schema.types + (owner.name.name -> d.copy(fields = merged)))
+      case Some(c: Typedef.Contract) =>
+        val merged = stub +: c.fields.filterNot(_.name == stub.name)
+        schema.copy(types = schema.types + (owner.name.name -> c.copy(fields = merged)))
+      case _ => schema
+    }
 
   /** Run one fn site through `FnPipeline.assemble` and project the IR node
     * to the model-level `TypedFn`. Plain-string pipeline errors are mapped
@@ -334,7 +354,8 @@ class BaboonTranslator[F[+_, +_]: Error2](
     *
     * `Self` is resolved role-dependently by the pipeline (P2): computed /
     * migrate `Self` is the owner container, default / normalize `Self` is
-    * the field's own value. No translator-local rewrite.
+    * the field's own value. No translator-local rewrite. Rootness arrives
+    * via `schema.roots` (built once per DTO in `convertDto`).
     */
   private def assembleFn(
     owner: TypeId.User,
@@ -343,15 +364,12 @@ class BaboonTranslator[F[+_, +_]: Error2](
     rawFn: RawFn,
     expectedRaw: RawTypeRef,
     rawSources: List[String],
-    stubField: Field,
     meta: RawNodeMeta,
     label: String,
-    siblings: Seq[Field] = Nil,
-    ownerIsRoot: Boolean = false,
+    schema: FnSchema,
     nodeCapture: Option[RawCapture] = None,
   ): F[NEList[BaboonIssue], model.TypedFn] = {
     val fn = rawFn
-    val schema = fnSchemaForAll(owner, stubField, siblings)
     val sourcesR: Either[List[String], Set[SchemaPath]] =
       rawSources.foldRight(Right(Nil): Either[List[String], List[SchemaPath]]) { (s, acc) =>
         for {
@@ -366,11 +384,11 @@ class BaboonTranslator[F[+_, +_]: Error2](
         val issues = es.flatMap(e => BaboonIssue.of(VerificationIssue.FnNotSupported(owner, s"$label fn: $e", meta)).toList)
         F.fail(NEList.unsafeFrom(issues))
       case Right(sources) =>
-        val input = FnPipeline.FnSiteInputs(fn, owner.name.name, fieldName, role, expectedRaw, sources, schema, ownerIsRoot, nodeCapture)
+        val input = FnPipeline.FnSiteInputs(fn, owner.name.name, fieldName, role, expectedRaw, sources, schema, nodeCapture)
         FnPipeline.assemble(List(input)) match {
           case Right(prog) =>
             prog.fns.headOption match {
-              case Some((_, typed, _)) => F.pure(model.TypedFn(typed.capture, typed.body, typed.expected, typed.params))
+              case Some((_, typed, _)) => F.pure(typed)
               case None =>
                 F.fail(BaboonIssue.of(VerificationIssue.FnNotSupported(owner, s"$label fn: pipeline returned no fns", meta)))
             }
@@ -385,8 +403,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
     owner: TypeId.User,
     field: RawField,
     meta: RawNodeMeta,
-    siblings: Seq[Field] = Nil,
-    ownerIsRoot: Boolean = false,
+    baseSchema: FnSchema,
   ): F[NEList[BaboonIssue], Seq[Field]] = {
     for {
       name    <- F.pure(FieldName(field.name.name))
@@ -400,16 +417,21 @@ class BaboonTranslator[F[+_, +_]: Error2](
       // dropped inside `DocFormat.liftDocs` per spec §5.4.
       docs = DocFormat.liftDocs(meta.docs)
       stubBase = Field(name, tpe, prevName, docs, None)
+      schema = withFieldStub(baseSchema, owner, stubBase)
       fdefault <- field.default match {
-        case Some(d) => convertDefault(owner, name, tpe, d, stubBase, meta, field.tpe, siblings, ownerIsRoot).map(Some(_))
-        case None    => F.pure(None)
+        case Some(d) => convertDefault(owner, name, tpe, d, field.tpe, meta, schema).map(Some(_))
+        case None => field.fn match {
+          // First-class fn home: `@default(fn)` lives in `field.fn`.
+          case Some(fn) => assembleFn(owner, name.name, FnRole.Default, fn, field.tpe, Nil, meta, "default", schema).map(f => Some(FieldDefault.Fn(f): FieldDefault))
+          case None     => F.pure(None)
+        }
       }
       normalize <- field.normalize match {
-        case Some(fn) => assembleFn(owner, name.name, FnRole.Normalize, fn, field.tpe, Nil, stubBase, meta, "normalize", siblings, ownerIsRoot).map(Some(_))
+        case Some(fn) => assembleFn(owner, name.name, FnRole.Normalize, fn, field.tpe, Nil, meta, "normalize", schema).map(Some(_))
         case None     => F.pure(None)
       }
       migrate <- field.migrate match {
-        case Some(m) => assembleFn(owner, name.name, FnRole.Migrate, m.fn, field.tpe, m.sources, stubBase, meta, "migrate", siblings, ownerIsRoot).map(fn => Some(TypedMigrate(fn)))
+        case Some(m) => assembleFn(owner, name.name, FnRole.Migrate, m.fn, field.tpe, m.sources, meta, "migrate", schema).map(fn => Some(TypedMigrate(fn)))
         case None    => F.pure(None)
       }
     } yield {
@@ -422,11 +444,9 @@ class BaboonTranslator[F[+_, +_]: Error2](
     fieldName: FieldName,
     tpe: TypeRef,
     raw: RawDefaultValue,
-    stub: Field,
-    meta: RawNodeMeta,
     expectedRaw: RawTypeRef,
-    siblings: Seq[Field] = Nil,
-    ownerIsRoot: Boolean = false,
+    meta: RawNodeMeta,
+    schema: FnSchema,
   ): F[NEList[BaboonIssue], FieldDefault] = {
     val targetType = tpe match {
       case TypeRef.Scalar(b: TypeId.BuiltinScalar) => b
@@ -447,7 +467,10 @@ class BaboonTranslator[F[+_, +_]: Error2](
         }
         F.pure(FieldDefault.SpecialFloatVal(kind))
       case RawDefaultValue.Fn(fn) =>
-        assembleFn(owner, fieldName.name, FnRole.Default, fn, expectedRaw, Nil, stub, meta, "default", siblings, ownerIsRoot).map(FieldDefault.Fn(_))
+        // Legacy totality fallback: the parser remaps `@default(fn)` into
+        // `RawField.fn`, so this arm only fires for hand-built ASTs (e.g.
+        // the pathological dual `@default(fn)` + `= fn` encoding).
+        assembleFn(owner, fieldName.name, FnRole.Default, fn, expectedRaw, Nil, meta, "default", schema).map(FieldDefault.Fn(_))
     }
   }
 
@@ -527,6 +550,11 @@ class BaboonTranslator[F[+_, +_]: Error2](
           stpe  <- convertTpe(rawField.tpe, m)
         } yield List(Field(sname, stpe, rawField.prevName.map(pn => FieldName(pn.name)), Docs.empty, None))
       }
+      // Single fn-assembly schema for the whole DTO: full sibling field list
+      // (so every fn body resolves `self.<sibling>`) with the owner's
+      // rootness baked into `roots`. Per-field converters receive it as data;
+      // no `ownerIsRoot` flag threads through them.
+      baseSchema = fnSchemaForAll(id, siblingStubs, isRoot)
       converted <- F.flatTraverseAccumErrors(dto.members) {
         case p: RawDtoMember.ContractRef =>
           dto match {
@@ -537,16 +565,16 @@ class BaboonTranslator[F[+_, +_]: Error2](
               F.pure(List.empty)
           }
         case f: RawDtoMember.FieldDef =>
-          dtoFieldToDefs(id, f.field, f.meta, siblingStubs, isRoot)
+          dtoFieldToDefs(id, f.field, f.meta, baseSchema)
         case f: RawDtoMember.TemplateArmFieldDef =>
           // PR-33.9 [PR-33.3-D01]: typer-internal carrier produced by
           // `TemplateInstantiator.convertLoweredArm` (Plus arm) for fields originating from a
           // `+ Template[Args]` inline expansion. Field-level conversion is identical to
           // `FieldDef`; the variant tag only matters for the duplicate-name detection below.
-          dtoFieldToDefs(id, f.field, f.meta, siblingStubs, isRoot)
+          dtoFieldToDefs(id, f.field, f.meta, baseSchema)
         case p: RawDtoMember.FnProperty =>
-          p.field.default match {
-            case Some(RawDefaultValue.Fn(fn)) =>
+          p.field.fn match {
+            case Some(fn) =>
               for {
                 fname <- F.pure(FieldName(p.field.name.name))
                 _     <- SymbolNames.validFieldName(fname, p.meta)
@@ -554,10 +582,10 @@ class BaboonTranslator[F[+_, +_]: Error2](
                 prevName = p.field.prevName.map(pn => FieldName(pn.name))
                 docs     = DocFormat.liftDocs(p.meta.docs)
                 stub     = Field(fname, ftpe, prevName, docs, None)
-                typed <- assembleFn(id, fname.name, FnRole.Computed, fn, p.field.tpe, Nil, stub, p.meta, "computed", siblingStubs, isRoot)
+                typed <- assembleFn(id, fname.name, FnRole.Computed, fn, p.field.tpe, Nil, p.meta, "computed", withFieldStub(baseSchema, id, stub))
               } yield Seq(Field(fname, ftpe, prevName, docs, None, computed = Some(typed)))
-            case _ =>
-              dtoFieldToDefs(id, p.field, p.meta, siblingStubs, isRoot)
+            case None =>
+              dtoFieldToDefs(id, p.field, p.meta, baseSchema)
           }
         case p: RawDtoMember.ParentDef =>
           // PR-33.2 (M33): when args.isDefined, the TemplateInstantiator pre-pass has already
@@ -570,7 +598,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
       }
       removed <- F.flatTraverseAccumErrors(dto.members) {
         case f: RawDtoMember.UnfieldDef =>
-          dtoFieldToDefs(id, f.field, f.meta, siblingStubs, isRoot)
+          dtoFieldToDefs(id, f.field, f.meta, baseSchema)
         case p: RawDtoMember.UnparentDef =>
           // PR-33.2 (M33): when args.isDefined, the TemplateInstantiator pre-pass has already
           // converted each substituted FieldDef into an UnfieldDef and spliced them into the
@@ -594,7 +622,7 @@ class BaboonTranslator[F[+_, +_]: Error2](
           // Field equality matches the receiver's other-arm-produced fields exactly.
           // PR-33.2-D06: per-field meta is preserved on each FieldDef so diagnostics anchor at
           // the original template-body field declaration site (not at the `^` operator position).
-          F.flatTraverseAccumErrors(f.fields)(fd => dtoFieldToDefs(id, fd.field, fd.meta, siblingStubs, isRoot))
+          F.flatTraverseAccumErrors(f.fields)(fd => dtoFieldToDefs(id, fd.field, fd.meta, baseSchema))
         case _ =>
           F.pure(Seq.empty)
       }

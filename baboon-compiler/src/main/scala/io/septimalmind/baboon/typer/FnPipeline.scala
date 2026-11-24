@@ -4,14 +4,18 @@ import io.septimalmind.baboon.parser.model.{RawCapture, RawFn, RawTypeName, RawT
 import io.septimalmind.baboon.typer.FnSensitivityExtractor.Slot
 import io.septimalmind.baboon.typer.model._
 
-/** P7: IR assembly & final invariants (standalone; not yet wired into `BaboonTranslator`).
+/** P7: IR assembly & final invariants.
   *
   * `assemble` runs P1→P2→P3→P4→P5→P6 in order over one batch of fn sites,
   * short-circuiting per-pass batch errors (resolution before gates before
   * cycles), then enforces the final backend-ready invariants (R3/R12).
-  *
-  * Translator gates stay untouched: everything here exercises the standalone
-  * passes only. Errors are plain strings, consistent with P5/P6.
+  * Batch invariant: P2 groups node captures by owner, P4 unions callee reads
+  * across the batch, and P6 orders the whole batch at once — so callers that
+  * lower a full program must collect every site and call `assemble` once.
+  * `BaboonTranslator.assembleFn` intentionally calls it with a single site:
+  * per-field lowering needs only the typed body, and program-level artifacts
+  * (gated sets, dep graph, emission order) are re-derived downstream.
+  * Errors are plain strings, consistent with P5/P6.
   */
 object FnPipeline {
 
@@ -31,27 +35,28 @@ object FnPipeline {
     expected: RawTypeRef,
     declaredSources: Set[SchemaPath],
     schema: FnSchema,
-    // Explicit gcRoot flag (DomainMember.User.root). Defaults false so
-    // existing call sites stay compatible; unknown/parentless owners are
-    // treated as root via the parentMap check below anyway. BaboonTranslator
-    // assembleFn sites should pass DomainMember.User.root here. #Assertion /
-    // #Provenance are implicitly root when added — no special code needed
-    // beyond honoring this flag.
-    ownerIsRoot: Boolean = false,
     nodeCapture: Option[RawCapture] = None,
-  )
+  ) {
+    /** Single-capture source rule (the one check, read by P2/P7 and the
+      * nested-capture rule): node-level `@capture` and per-fn `[...]` are
+      * mutually exclusive, and at most one per-fn capture is allowed (the
+      * parser already rejects two at parse time; this is defense in depth).
+      */
+    def singleCapture: Either[String, Option[RawCapture]] =
+      (nodeCapture, rawFn.captures) match {
+        case (Some(_), _ :: _) =>
+          Left("node has @capture and this fn also declares a capture: only one source is allowed (remove the per-fn `[...]` head)")
+        case (Some(c), Nil) => Right(Some(c))
+        case (None, Nil)    => Right(None)
+        case (None, cap :: Nil) => Right(Some(cap))
+        case (None, many) =>
+          Left(s"fn has ${many.size} captures, at most one is allowed")
+      }
+  }
 
-  /** P7 IR node: one site lowered through P1→P3. Single-capture is structural:
-    * zero or one capture (`Option`), never a list.
-    */
-  final case class TypedFn(
-    site: FnSite,
-    capture: Option[TypedCapture],
-    body: TypedBody,
-    expected: TypeRef,
-    params: List[(String, TypeRef)] = Nil
-  )
-
+  // P7 IR nodes are `model.TypedFn` (single home for the type; the site
+  // travels alongside in `ValidatedFnProgram.fns`). Single-capture is
+  // structural: zero or one capture (`Option`), never a list.
   /** Backend-ready program: one IR node + sensitivity per site, the P5 gated
     * fns, the full P6 edge set and the deterministic emission order.
     */
@@ -120,7 +125,17 @@ object FnPipeline {
     * `Self` type as the legacy `self: Self` alias, so both forms flow through
     * this rewrite and `checkComputedSelf` identically.
     */
-  private def selfFor(role: FnRole, owner: String, expected: RawTypeRef, raw: RawTypeRef): RawTypeRef = raw match {
+  /** Role-dependent `Self` target as a resolved type: `Computed`/`Migrate`
+    * self is the enclosing container, `Default`/`Normalize` self is the
+    * field's own value. Raw-level sibling of `selfFor` for call sites that
+    * already work on converted types.
+    */
+  def selfForType(role: FnRole, owner: TypeRef, expected: TypeRef): TypeRef = role match {
+    case FnRole.Computed | FnRole.Migrate   => owner
+    case FnRole.Default | FnRole.Normalize => expected
+  }
+
+  def selfFor(role: FnRole, owner: String, expected: RawTypeRef, raw: RawTypeRef): RawTypeRef = raw match {
     case RawTypeRef.Simple(n, pre) if n.name == "Self" =>
       role match {
         case FnRole.Computed | FnRole.Migrate   => RawTypeRef.Simple(RawTypeName(owner), pre)
@@ -254,10 +269,11 @@ object FnPipeline {
           // any capture would dangle on a parentless instance —
           // even if the capture dominates in the static graph (gcRoot types
           // can have incoming edges yet still exist parentless at runtime).
-          // Explicit ownerIsRoot covers those gcRoot cases; parentless in
+          // `schema.roots` (projected from `DomainMember.User.isRoot` by the
+          // translator) covers those gcRoot cases; parentless in
           // the parentMap (no incoming edges, or unknown) counts as root.
           // #Assertion / #Provenance will be implicitly root when added.
-          val isRoot = in.ownerIsRoot || parents.getOrElse(in.owner, Set.empty).isEmpty
+          val isRoot = schema.roots.contains(in.owner) || parents.getOrElse(in.owner, Set.empty).isEmpty
           if (isRoot)
             FnTypes.fail(s"${tag(site)}: capture `${cap.name}` root `${cap.rootType}` is not an ancestor of decorated node `${in.owner}.${in.field}` (root `${in.owner}` may be instantiated without a parent: no capture is allowed)")
           else if (roots.exists(r => dominates(r, in.owner, parents))) FnTypes.ok(())
@@ -279,7 +295,7 @@ object FnPipeline {
     schema: FnSchema,
     capturingOwners: Set[String],
   ): FnTypes.Res[Unit] = {
-    val hasOwnCapture = in.nodeCapture.isDefined || in.rawFn.captures.nonEmpty
+    val hasOwnCapture = in.singleCapture.toOption.flatten.isDefined
     if (!hasOwnCapture) FnTypes.ok(())
     else {
       val offenders =
@@ -326,21 +342,22 @@ object FnPipeline {
         .traverse(in.rawFn.params.map { p =>
           FnTypes.resolveRaw(selfFor(in.role, in.owner, in.expected, p.tpe), schema).left.map(_.map(m => s"${tag(site)}: param `${p.name}`: $m")).map(t => p.name -> t)
         })
+      // Node captures resolve once per owner (`nodeResolved`); per-fn heads
+      // resolve here. `singleCapture` already rejected dual sources.
       val capR: FnTypes.Res[(Option[TypedCapture], List[(String, ScopeEntry)])] =
-        (nodeResolved.get(in.owner), in.rawFn.captures) match {
-          case (Some(_), _ :: _) =>
-            FnTypes.fail(s"${tag(site)}: node `${in.owner}` has @capture and this fn also declares a capture: only one source is allowed (remove the per-fn `[...]` head)")
-          case (Some((c, b)), Nil) =>
-            FnTypes.ok((Some(c), b))
-          case (None, Nil) => FnTypes.ok((None, Nil))
-          case (None, cap :: Nil) =>
+        in.singleCapture.left.map(err => List(s"${tag(site)}: $err")).flatMap {
+          case _ if in.nodeCapture.isDefined =>
+            nodeResolved.get(in.owner) match {
+              case Some((c, b)) => FnTypes.ok((Some(c): Option[TypedCapture], b))
+              case None         => FnTypes.ok((None: Option[TypedCapture], List.empty[(String, ScopeEntry)]))
+            }
+          case Some(raw) =>
             FnCaptureResolver
-              .resolveCapture(cap.copy(rootType = selfFor(in.role, in.owner, in.expected, cap.rootType)), schema)
+              .resolveCapture(raw.copy(rootType = selfFor(in.role, in.owner, in.expected, raw.rootType)), schema)
               .left
               .map(_.map(m => s"${tag(site)}: $m"))
               .map { case (c, b) => (Some(c), b) }
-          case (None, many) =>
-            FnTypes.fail(s"${tag(site)}: fn has ${many.size} captures, at most one is allowed")
+          case None => FnTypes.ok((None, Nil))
         }
       (expR, paramsR, capR) match {
         case (Right(exp), Right(params), Right((cap, bindings))) =>
@@ -378,7 +395,7 @@ object FnPipeline {
     val out = p2s.flatMap { p2 =>
       val scope = FnBodyTyper.seedScope(p2.params, p2.bindings)
       FnBodyTyper.typeBody(p2.in.rawFn.body, scope, p2.in.schema, p2.expected) match {
-        case Right(body) => Some(P3(p2, TypedFn(p2.site, p2.capture, body, p2.expected, p2.params), scope))
+        case Right(body) => Some(P3(p2, TypedFn(p2.capture, body, p2.expected, p2.params), scope))
         case Left(es) =>
           es.foreach(e => errs += s"${tag(p2.site)}: $e")
           None
@@ -423,37 +440,20 @@ object FnPipeline {
     if (p4s.isEmpty) return p4s
     val bySite: Map[(String, String), P4] =
       p4s.map(p => (p.p3.p2.in.owner, p.p3.p2.in.field) -> p).toMap
+    // Callee discovery via the shared `TypedExpr` visitor (one home for the
+    // ADT walk; order is irrelevant — results feed map lookups below).
     def calleeSites(body: TypedBody): List[(String, String)] = {
       val out = List.newBuilder[(String, String)]
-      def expr(e: TypedExpr): Unit = e match {
-        case TypedExpr.UserCall(t, m, as, _) =>
+      def one(e: TypedExpr): Unit = e match {
+        case TypedExpr.UserCall(t, m, _, _) =>
           t.tpe match {
             case TypeRef.Scalar(id: TypeId.User) => out += ((id.name.name, m))
             case _                               => ()
           }
-          expr(t); as.foreach(expr)
-        case TypedExpr.Call(t, _, as, _)  => expr(t); as.foreach(expr)
-        case TypedExpr.BinOp(_, l, r, _)  => expr(l); expr(r)
-        case TypedExpr.UnaryOp(_, x, _)   => expr(x)
-        case TypedExpr.If(c, t, el, _)    => expr(c); expr(t); expr(el)
-        case TypedExpr.Assign(t, v, _)    => expr(t); expr(v)
-        case TypedExpr.ForIn(_, it, b, _) => expr(it); block(b)
-        case TypedExpr.ForC(i, c, s, b, _) => expr(i.value); expr(c); expr(s); block(b)
-        case TypedExpr.Match(s, arms, _)  => expr(s); arms.foreach(a => block(a.body))
-        case TypedExpr.Block(sts, v, _)   => sts.foreach(stmt); v.foreach(expr)
-        case TypedExpr.Lit(_, _)          => ()
-        case TypedExpr.Path(_, segs, _)   => segs.foreach {
-          case TypedPathSeg.Index(i, _) => expr(i)
-          case _                        => ()
-        }
+        case _ => ()
       }
-      def block(b: TypedExpr.Block): Unit = { b.stmts.foreach(stmt); b.value.foreach(expr) }
-      def stmt(s: TypedStmt): Unit = s match {
-        case TypedStmt.Let(_, _, v) => expr(v)
-        case TypedStmt.Effect(e)    => expr(e)
-        case TypedStmt.Assert(a)    => expr(a.cond); a.msg.foreach(expr)
-      }
-      body.stmts.foreach(stmt); expr(body.result)
+      body.stmts.foreach(TypedExpr.foreachStmt(_)(one))
+      TypedExpr.foreach(body.result)(one)
       out.result()
     }
     // Fixpoint: callees may themselves call further methods.
@@ -466,9 +466,9 @@ object FnPipeline {
         val key = (p.p3.p2.in.owner, p.p3.p2.in.field)
         calleeSites(p.p3.typed.body).foreach { ck =>
           bySite.get(ck).foreach { _ =>
-            val add = reads.getOrElse(ck, Sensitivity(Set.empty, Set.empty, Set.empty))
-            val cur = reads.getOrElse(key, Sensitivity(Set.empty, Set.empty, Set.empty))
-            val merged = Sensitivity(cur.leafReads ++ add.leafReads, cur.shapeReads ++ add.shapeReads, cur.prevReads ++ add.prevReads)
+            val add = reads.getOrElse(ck, Sensitivity(Set.empty, Set.empty))
+            val cur = reads.getOrElse(key, Sensitivity(Set.empty, Set.empty))
+            val merged = Sensitivity(cur.leafReads ++ add.leafReads, cur.shapeReads ++ add.shapeReads)
             if (merged != cur) { reads = reads.updated(key, merged); changed = true }
           }
         }
@@ -538,18 +538,12 @@ object FnPipeline {
       }
     }
 
-    // Single-capture asserted on IR nodes.
+    // Single-capture asserted on IR nodes (same `singleCapture` rule as P2).
     p4s.foreach { p =>
-      if (p.p3.p2.in.rawFn.captures.size > 1)
-        errs += s"${tag(p.p3.p2.site)}: fn has ${p.p3.p2.in.rawFn.captures.size} captures, at most one is allowed"
-    }
-
-    // Deferred-prev: prevReads == ∅. SchemaPath carries no isPrev flag (there is
-    // no `!old` AST representation and P2 resolves no prev bindings), so empty
-    // prevReads is the whole invariant.
-    p4s.foreach { p =>
-      if (p.read.prevReads.nonEmpty)
-        errs += s"${tag(p.p3.p2.site)}: prev reads are not supported (isPrev must be false)"
+      p.p3.p2.in.singleCapture match {
+        case Left(m) => errs += s"${tag(p.p3.p2.site)}: $m"
+        case _       => ()
+      }
     }
 
     // Sealing: every read target resolves in the schema.
@@ -587,63 +581,31 @@ object FnPipeline {
     case _                            => false
   }
 
+  // R12 body-type sweep via the shared `TypedExpr` visitor (statement types
+  // seeded explicitly; expression types in pre-order).
   private def collectBodyTypes(body: TypedBody): List[TypeRef] = {
     val out = List.newBuilder[TypeRef]
-    def block(b: TypedExpr.Block): Unit = {
-      b.stmts.foreach(stmt)
-      b.value.foreach(expr)
-    }
-    def expr(e: TypedExpr): Unit = {
+    def one(e: TypedExpr): Unit = {
       out += e.tpe
       e match {
-        case TypedExpr.Lit(_, _)          => ()
-        case TypedExpr.Path(_, segs, _)   => segs.foreach {
-          case TypedPathSeg.Field(_, t) => out += t
-          case TypedPathSeg.Index(i, t) => out += t; expr(i)
-        }
-        case TypedExpr.Call(t, _, as, _)  => expr(t); as.foreach(expr)
-        case TypedExpr.UserCall(t, _, as, _) => expr(t); as.foreach(expr)
-        case TypedExpr.BinOp(_, l, r, _)  => expr(l); expr(r)
-        case TypedExpr.UnaryOp(_, x, _)   => expr(x)
-        case TypedExpr.If(c, t, el, _)    => expr(c); expr(t); expr(el)
-        case TypedExpr.Assign(t, v, _)    => expr(t); expr(v)
-        case TypedExpr.ForIn(_, it, b, _) => expr(it); block(b)
-        case TypedExpr.ForC(i, c, s, b, _) => expr(i.value); expr(c); expr(s); block(b)
-        case TypedExpr.Match(s, arms, _)  => expr(s); arms.foreach(a => block(a.body))
-        case TypedExpr.Block(sts, v, _)   => sts.foreach(stmt); v.foreach(expr)
+        case TypedExpr.Path(_, segs, _) =>
+          segs.foreach {
+            case TypedPathSeg.Field(_, t) => out += t
+            case TypedPathSeg.Index(_, t) => out += t
+          }
+        case _ => ()
       }
     }
-    def stmt(s: TypedStmt): Unit = s match {
-      case TypedStmt.Let(_, t, v) => out += t; expr(v)
-      case TypedStmt.Effect(e)    => expr(e)
-      case TypedStmt.Assert(a)    => expr(a.cond); a.msg.foreach(expr)
+    body.stmts.foreach {
+      case TypedStmt.Let(_, t, v) => out += t; TypedExpr.foreach(v)(one)
+      case TypedStmt.Effect(e)    => TypedExpr.foreach(e)(one)
+      case TypedStmt.Assert(a)    => TypedExpr.foreach(a.cond)(one); a.msg.foreach(m => TypedExpr.foreach(m)(one))
     }
-    body.stmts.foreach(stmt)
-    expr(body.result)
+    TypedExpr.foreach(body.result)(one)
     out.result()
   }
 
-  private def resolvePath(schema: FnSchema, path: SchemaPath): Option[String] = {
-    if (schema.lookup(path.root.name.name).isEmpty)
-      return Some(s"unknown type: ${path.root.name.name}")
-    var cur: TypeRef = TypeRef.Scalar(path.root)
-    val it = path.fieldNames.iterator
-    while (it.hasNext) {
-      val seg = it.next()
-      // Peel transparent opt layers, then situate collections into elements.
-      var t = cur
-      while (FnTypes.isOpt(t)) t = FnTypes.elemType(t).getOrElse(t)
-      if (FnTypes.isLst(t) || FnTypes.isSet(t) || FnTypes.isMap(t))
-        t = FnTypes.elemType(t).getOrElse(t)
-      FnTypes.dtoFields(t, schema) match {
-        case None => return Some(s"no fields on $t (field `$seg`)")
-        case Some(fs) =>
-          fs.find(_.name.name == seg) match {
-            case None    => return Some(s"unknown field `$seg` on $t")
-            case Some(f) => cur = f.tpe
-          }
-      }
-    }
-    None
-  }
+  // Single path-validation home: `SchemaPath.resolve` (same walk P5 uses).
+  private def resolvePath(schema: FnSchema, path: SchemaPath): Option[String] =
+    SchemaPath.resolve(path.root, path.fieldNames, schema).left.toOption
 }

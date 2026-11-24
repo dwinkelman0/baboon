@@ -140,7 +140,7 @@ class RsJsonCodecGenerator(
     val what = name.name
     defn.defn match {
       case d: Typedef.Dto =>
-        // prereq 4: computed fields are no-wire, excluded from JSON key set.
+        // computed fields are no-wire, excluded from JSON key set.
         val binds = d.fields.toList.filter(_.computed.isEmpty).map {
           f =>
             val rsName  = toSnakeCase(f.name.name)
@@ -301,7 +301,7 @@ class RsJsonCodecGenerator(
   private def explicitEncoder(defn: DomainMember.User, name: RsValue.RsType): TextTree[RsValue] = {
     defn.defn match {
       case d: Typedef.Dto =>
-        // prereq 4: computed fields are no-wire, excluded from JSON key set.
+        // computed fields are no-wire, excluded from JSON key set.
         val inserts = d.fields.toList.filter(_.computed.isEmpty).map {
           f =>
             val wireName = f.name.name

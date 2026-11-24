@@ -124,8 +124,7 @@ class AdtInheritanceExpander[F[+_, +_]: Error2](
         // present and is never removed by `-` or filtered out by `^`. This makes the idiomatic
         // "override an inherited branch" form work:
         //   `+ Base; - Base.X; data X { ...new shape... }`
-        // keeps the locally-redefined `X`. Previously `- Base.X` excluded by *name* across the
-        // whole `local ∪ includes` set, which silently dropped the local `X` too. A local branch
+        // keeps the locally-redefined `X`. A local branch
         // colliding with an inherited one of the same name (without an explicit `- Base.X`) is
         // still reported as DuplicatedAdtBranches below — the conflict must be disambiguated.
         val includedAfterExclude: Seq[(RawAdtMember, TypeId)] =

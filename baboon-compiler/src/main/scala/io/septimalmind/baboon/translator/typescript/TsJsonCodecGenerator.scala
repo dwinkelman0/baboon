@@ -111,7 +111,7 @@ class TsJsonCodecGenerator(
   }
 
   private def genDtoCodec(dto: Typedef.Dto, name: TsValue.TsType): (TextTree[TsValue], TextTree[TsValue]) = {
-    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    // computed fields are no-wire, excluded from JSON key set.
     val encodeFields = dto.fields.filter(_.computed.isEmpty).map {
       f =>
         val fld        = f.name.name
@@ -120,7 +120,7 @@ class TsJsonCodecGenerator(
         q""""$fld": ${mkJsonEncoder(f.tpe, q"value.$escapedFld")},"""
     }
 
-    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    // computed fields are no-wire, excluded from JSON key set.
     val decodeFields = dto.fields.filter(_.computed.isEmpty).map {
       f =>
         val fld = f.name.name

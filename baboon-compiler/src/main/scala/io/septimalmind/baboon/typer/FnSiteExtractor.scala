@@ -7,7 +7,9 @@ import io.septimalmind.baboon.typer.model._
   *
   * Pure: needs no schema, only member/field names. Each extracted site keeps
   * the raw fn plus its role (`Default` / `Normalize` / `Migrate` from
-  * `RawField`, `Computed` from `FnProperty`).
+  * `RawField`, `Computed` from `FnProperty`). Both fn homes flow through the
+  * first-class `field.fn` accessor: `@default(fn)` initializers (on
+  * `FieldDef`) and `= fn` computed initializers (on `FnProperty`).
   *
   * Defense-in-depth checks (the parser already enforces single-capture):
   *   - at most one capture per fn;
@@ -23,16 +25,14 @@ object FnSiteExtractor {
     val sites = members.collect {
       case RawDtoMember.FieldDef(field, _) =>
         List(
-          field.default.collect { case RawDefaultValue.Fn(fn) =>
-            FnSite(FnSiteId(owner, field.name.name, FnRole.Default), fn)
-          },
+          field.fn.map(fn => FnSite(FnSiteId(owner, field.name.name, FnRole.Default), fn)),
           field.normalize.map(fn => FnSite(FnSiteId(owner, field.name.name, FnRole.Normalize), fn)),
           field.migrate.map(m => FnSite(FnSiteId(owner, field.name.name, FnRole.Migrate), m.fn)),
         ).flatten
       case RawDtoMember.FnProperty(field, _) =>
-        field.default.collect { case RawDefaultValue.Fn(fn) =>
-          FnSite(FnSiteId(owner, field.name.name, FnRole.Computed), fn)
-        }.toList
+        // Single source of truth: computed fns live in `field.fn`
+        // (the parser no longer dual-encodes them into `field.default`).
+        field.fn.map(fn => FnSite(FnSiteId(owner, field.name.name, FnRole.Computed), fn)).toList
     }.flatten
     val errors = sites.flatMap(s => check(s.rawFn).left.toOption.toList.flatten)
     if (errors.nonEmpty) Left(errors) else Right(sites)

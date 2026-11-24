@@ -10,19 +10,16 @@ package io.septimalmind.baboon.typer.model
   * transparent and contribute no segment (the traversed element/value
   * type is recorded in `fieldType`, not as a path step).
   *
-  * `isPrev` is the canonical scope rendering (`false` = this version,
-  * `true` = previous version, resolved later via the evolution graph —
-  * no version payload on the path itself).
+  * There is no previous-version scope on the path: `!old` has no AST
+  * representation and P2 resolves no prev bindings.
   */
 case class SchemaPath(
   root: TypeId.User,
-  isPrev: Boolean = false,
   steps: List[SchemaStep] = Nil
 ) {
   override def toString: String = {
-    val scope = if (isPrev) "prev" else "this"
     val segs  = steps.map(_.asString).mkString("/", "/", "")
-    s"$root@$scope$segs"
+    s"$root@this$segs"
   }
 
   /** Dotted rendering (`Owner.a.b`) used in diagnostics. Stable across the
@@ -65,7 +62,7 @@ object SchemaPath {
     import FnTypes._
     if (schema.lookup(root.name.name).isEmpty)
       return Left(s"unknown type: ${root.name.name}")
-    walk(TypeRef.Scalar(root), names, schema).map(steps => SchemaPath(root, isPrev = false, steps))
+    walk(TypeRef.Scalar(root), names, schema).map(steps => SchemaPath(root, steps))
   }
 
   /** Extend an already-resolved path with further field names, resolved

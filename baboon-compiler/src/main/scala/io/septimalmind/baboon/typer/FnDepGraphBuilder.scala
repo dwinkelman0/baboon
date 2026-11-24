@@ -5,8 +5,8 @@ import io.septimalmind.baboon.typer.model.FnTypes._
 
 import scala.collection.mutable
 
-/** P6: dependency graph + emission order for gated fns (standalone; not yet wired
-  * into `BaboonTranslator`).
+/** P6: dependency graph + emission order for gated fns (wired via
+  * `FnPipeline.pass6`).
   *
   * Nodes are fn nodes (`owner + field + role`) plus one base field node per materialized
   * slot. An edge `B -> A` ("B after A") means B must be instantiated after A:
@@ -157,7 +157,7 @@ object FnDepGraphBuilder {
   }
 
   /** B reads something A writes: same slot (root + head segment) or a shape overlap
-    * (B's `shapeReads` holds an owner A writes to). `prevReads` count as reads.
+    * (B's `shapeReads` holds an owner A writes to).
     */
   private def overlaps(b: Sensitivity, a: Sensitivity): Boolean =
     slotOverlaps(b, a) ||
@@ -167,13 +167,31 @@ object FnDepGraphBuilder {
     * the builder can keep same-slot self-reads as hard errors while ignoring
     * vacuous shape-only self-edges (see call site). */
   private def slotOverlaps(b: Sensitivity, a: Sensitivity): Boolean = {
-    val bReads = b.leafReads.map(slotKey) ++ b.prevReads.map(u => (u, None))
+    val bReads = b.leafReads.map(slotKey)
     val aWrites = a.leafReads.map(slotKey)
     (bReads intersect aWrites).nonEmpty
   }
 
   private def slotKey(p: SchemaPath): (TypeId.User, Option[String]) =
     (p.root, p.headName)
+
+  /** Model vs builder worlds: `model.FnDepGraph` is the stable graph over
+    * fn-annotated fields (fn nodes only, `ReadAfter`/`NormalizeAfter` kinds);
+    * the builder adds ordering-only detail (base field-slot nodes plus
+    * `CaptureDefer`/`PassOrder`/`SlotMaterialization` edges) to derive a
+    * deterministic emission order. The projections below drop ordering-only
+    * detail (`None` where the model has no counterpart).
+    */
+  def toModelNode(n: DepNode): Option[model.FnNode] = n match {
+    case DepNode.Fn(id) =>
+      Some(model.FnNode((id.owner, FieldName(id.field)), id.role == FnRole.Computed))
+    case _: DepNode.FieldSlot => None
+  }
+
+  def toModelKind(k: DepKind): Option[model.DepKind] = k match {
+    case DepKind.ReadAfter => Some(model.DepKind.ReadAfter)
+    case _                 => None
+  }
 
   // -- deterministic Kahn ----------------------------------------------------------
 
@@ -225,13 +243,15 @@ object FnDepGraphBuilder {
     def visit(n: DepNode, stack: List[DepNode]): Boolean = {
       state(n) = 1
       val path = stack :+ n
-      succ.getOrElse(n, Nil).sortBy(_.sortKey).exists { m =>
+      val hasCycle = succ.getOrElse(n, Nil).sortBy(_.sortKey).exists { m =>
         if (state(m) == 1) {
           found = (path.drop(path.indexOf(m)) :+ m)
           true
         } else if (state(m) == 0) visit(m, path)
         else false
-      } || { state(n) = 2; false }
+      }
+      state(n) = 2
+      hasCycle
     }
     ordered.exists(n => state(n) == 0 && visit(n, Nil))
     if (found.nonEmpty) found.map(_.render)

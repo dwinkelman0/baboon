@@ -7,7 +7,6 @@ object BodyExpr {
 
   object Segment {
     final case class Field(name: String) extends Segment
-    final case class Variant(name: String) extends Segment
     final case class Index(expr: BodyExpr) extends Segment
   }
 

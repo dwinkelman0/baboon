@@ -3,7 +3,7 @@ package io.septimalmind.baboon.typer.model
 import io.septimalmind.baboon.parser.model.{RawFn, RawTypeRef}
 import izumi.fundamentals.collections.nonempty.NEList
 
-/** P1/P2/P3 fn-pipeline IR (standalone; not yet wired into `BaboonTranslator`).
+/** P1/P2/P3 fn-pipeline IR.
   *
   * `RawFn` (parser AST) is lowered in three passes:
   *   - P1 `FnSiteExtractor`: [[RawFn]] + member role => [[FnSite]] (no schema).
@@ -96,6 +96,70 @@ sealed trait TypedExpr {
   def tpe: TypeRef
 }
 object TypedExpr {
+  /** Shared visitor: every `TypedExpr`/`TypedStmt` recursion in the pipeline
+    * (P4 callee union, R12 body-type sweep, assert collection, sensitivity)
+    * goes through here, so new ADT cases need exactly one edit.
+    */
+  def foreach(e: TypedExpr)(f: TypedExpr => Unit): Unit = {
+    f(e)
+    e match {
+      case Lit(_, _) => ()
+      case Path(_, segs, _) =>
+        segs.foreach {
+          case TypedPathSeg.Index(i, _) => foreach(i)(f)
+          case _                        => ()
+        }
+      case Call(t, _, as, _)     => foreach(t)(f); as.foreach(foreach(_)(f))
+      case UserCall(t, _, as, _) => foreach(t)(f); as.foreach(foreach(_)(f))
+      case BinOp(_, l, r, _)     => foreach(l)(f); foreach(r)(f)
+      case UnaryOp(_, x, _)      => foreach(x)(f)
+      case If(c, t, el, _)       => foreach(c)(f); foreach(t)(f); foreach(el)(f)
+      case Assign(t, v, _)       => foreach(t)(f); foreach(v)(f)
+      case ForIn(_, it, b, _)    => foreach(it)(f); foreachBlock(b)(f)
+      case ForC(i, c, s, b, _)   => foreach(i.value)(f); foreach(c)(f); foreach(s)(f); foreachBlock(b)(f)
+      case Match(s, arms, _)     => foreach(s)(f); arms.foreach(a => foreachBlock(a.body)(f))
+      case Block(sts, v, _)      => sts.foreach(foreachStmt(_)(f)); v.foreach(foreach(_)(f))
+    }
+  }
+  def foreachStmt(s: TypedStmt)(f: TypedExpr => Unit): Unit = s match {
+    case TypedStmt.Let(_, _, v) => foreach(v)(f)
+    case TypedStmt.Effect(e)    => foreach(e)(f)
+    case TypedStmt.Assert(a)    => foreach(a.cond)(f); a.msg.foreach(foreach(_)(f))
+  }
+  def foreachBlock(b: TypedExpr.Block)(f: TypedExpr => Unit): Unit = {
+    b.stmts.foreach(foreachStmt(_)(f)); b.value.foreach(foreach(_)(f))
+  }
+  def fold[A](e: TypedExpr, z: A)(op: (A, TypedExpr) => A): A = {
+    var acc = z
+    foreach(e)(n => acc = op(acc, n))
+    acc
+  }
+  /** Direct child expressions. `Block`/`For`/`Match` bodies flatten to their
+    * expression children (see `stmtChildren`); nested `Assert` *statements*
+    * inside those bodies are NOT included — use `foreachStmt`/`foreachBlock`
+    * for statement-aware walks.
+    */
+  def children(e: TypedExpr): List[TypedExpr] = e match {
+    case Lit(_, _)             => Nil
+    case Path(_, segs, _)      => segs.collect { case TypedPathSeg.Index(i, _) => i }
+    case Call(t, _, as, _)     => t :: as
+    case UserCall(t, _, as, _) => t :: as
+    case BinOp(_, l, r, _)     => List(l, r)
+    case UnaryOp(_, x, _)      => List(x)
+    case If(c, t, el, _)       => List(c, t, el)
+    case Assign(t, v, _)       => List(t, v)
+    case ForIn(_, it, b, _)    => it :: blockChildren(b)
+    case ForC(i, c, s, b, _)   => i.value :: c :: s :: blockChildren(b)
+    case Match(s, arms, _)     => s :: arms.flatMap(a => blockChildren(a.body))
+    case Block(sts, v, _)      => sts.flatMap(stmtChildren) ++ v.toList
+  }
+  def stmtChildren(s: TypedStmt): List[TypedExpr] = s match {
+    case TypedStmt.Let(_, _, v) => List(v)
+    case TypedStmt.Effect(e)    => List(e)
+    case TypedStmt.Assert(a)    => a.cond :: a.msg.toList
+  }
+  def blockChildren(b: TypedExpr.Block): List[TypedExpr] =
+    b.stmts.flatMap(stmtChildren) ++ b.value.toList
   final case class Lit(lit: TypedLit, tpe: TypeRef) extends TypedExpr
   final case class Path(root: String, segments: List[TypedPathSeg], tpe: TypeRef) extends TypedExpr
   final case class Call(target: TypedExpr, method: String, args: List[TypedExpr], tpe: TypeRef) extends TypedExpr
@@ -164,6 +228,11 @@ final case class FnAdtVariant(name: String, payload: Option[TypeRef])
 final case class FnSchema(
   types: Map[String, Typedef],
   adts: Map[String, List[FnAdtVariant]],
+  /** Root owners (projected from `DomainMember.User.isRoot`): a root node
+    * may be instantiated without a parent, so no capture is allowed on it
+    * even when the static parent graph shows incoming edges.
+    */
+  roots: Set[String] = Set.empty,
 ) {
   def lookup(name: String): Option[Typedef] = types.get(name)
 }
@@ -304,6 +373,12 @@ object FnTypes {
     case _ => None
   }
 
+  /** Owner display name for diagnostics: user-type simple name, otherwise the full type rendering. */
+  def ownerName(t: TypeRef): String = t match {
+    case TypeRef.Scalar(id: TypeId.User) => id.name.name
+    case other                           => other.toString
+  }
+
   def isNumeric(t: TypeRef): Boolean = t match {
     case TypeRef.Scalar(id: TypeId.BuiltinScalar) =>
       Set("i08", "i16", "i32", "i64", "u08", "u16", "u32", "u64", "f32", "f64", "f128").contains(id.name.name)
@@ -375,21 +450,33 @@ object FnTypes {
         case _ => None
       }
 
+  /** Which literal form (if any) produced `actual`: int/float literals carry
+    * their default widths (`i32`/`f64`) and conform to any numeric/float,
+    * `null` conforms to any `opt`; anything else must match strictly.
+    */
+  sealed trait LiteralKind
+  object LiteralKind {
+    case object Plain extends LiteralKind
+    case object IntLit extends LiteralKind
+    case object FloatLit extends LiteralKind
+    case object NullLit extends LiteralKind
+  }
+
   /** Value of type `actual` may flow into a slot of type `expected`.
     * Strict equality, plus: `i32`-defaulted int literals fit any numeric,
     * `f64`-defaulted float literals fit any float, `null` fits any `opt`.
     */
-  def conforms(actual: TypeRef, actualIsIntLit: Boolean, actualIsFloatLit: Boolean, actualIsNull: Boolean, expected: TypeRef): Boolean =
+  def conforms(actual: TypeRef, kind: LiteralKind, expected: TypeRef): Boolean =
     actual == expected ||
-      (actualIsIntLit && isNumeric(expected)) ||
-      (actualIsFloatLit && isFloat(expected)) ||
-      (actualIsNull && isOpt(expected))
+      (kind == LiteralKind.IntLit && isNumeric(expected)) ||
+      (kind == LiteralKind.FloatLit && isFloat(expected)) ||
+      (kind == LiteralKind.NullLit && isOpt(expected))
 
   def conformsLit(actual: TypedExpr, expected: TypeRef): Boolean = actual match {
-    case TypedExpr.Lit(TypedLit.IntLit(_), t)    => conforms(t, actualIsIntLit = true, actualIsFloatLit = false, actualIsNull = false, expected)
-    case TypedExpr.Lit(TypedLit.FloatLit(_), t)  => conforms(t, actualIsIntLit = false, actualIsFloatLit = true, actualIsNull = false, expected)
-    case TypedExpr.Lit(TypedLit.NullLit(), t)    => conforms(t, actualIsIntLit = false, actualIsFloatLit = false, actualIsNull = true, expected)
-    case other                                   => conforms(other.tpe, actualIsIntLit = false, actualIsFloatLit = false, actualIsNull = false, expected)
+    case TypedExpr.Lit(TypedLit.IntLit(_), t)   => conforms(t, LiteralKind.IntLit, expected)
+    case TypedExpr.Lit(TypedLit.FloatLit(_), t) => conforms(t, LiteralKind.FloatLit, expected)
+    case TypedExpr.Lit(TypedLit.NullLit(), t)  => conforms(t, LiteralKind.NullLit, expected)
+    case other                                  => conforms(other.tpe, LiteralKind.Plain, expected)
   }
 
   /** 18-method closed call table (typer-owned rejection: unknown method names are rejected here, not by the parser):

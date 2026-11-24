@@ -8,12 +8,10 @@ sealed trait RawLocatorSeg
   * traversing through them is an ordinary `.field` step with no key required.
   * In particular `opt.Some` is implied when the path descends into the payload
   * (`None` has no child), so the canonical form omits `.Some`. An explicit
-  * `.Some` still parses here as `Field("Some")` (resolved later by the typer),
-  * never as `Variant`.
+  * `.Some` still parses here as `Field("Some")` (canonicalized away by the typer).
   */
 object RawLocatorSeg {
   final case class Field(name: String) extends RawLocatorSeg
-  final case class Variant(name: String) extends RawLocatorSeg
   final case class Key(name: String) extends RawLocatorSeg // "$var"
 }
 
@@ -41,25 +39,16 @@ final case class RawCapture(
   name: String,
   rootType: RawTypeRef,
   path: List[RawCaptureStep],
-) {
-
-  /** Backward-compatible view: the first star step, if any. */
-  def star: Option[RawStarCapture] = path.collectFirst { case RawCaptureStep.Star(s) => s }
-
-  /** Backward-compatible view: all plain locator segments in order. */
-  def locator: List[RawLocatorSeg] = path.collect { case RawCaptureStep.Single(seg) => seg }
-}
+)
 
 final case class RawFnParam(name: String, tpe: RawTypeRef)
 
 /** Fn body: the full statement list plus the trailing result expression.
   *
   * `stmts` is the canonical statement list (lets, assigns, for-loops, matches).
-  * `letBindings` is the legacy type-erased view of all top-level `let`s
-  * (including type-annotated ones) and is kept so existing readers keep working.
+  * Top-level `let` bindings are derived from `stmts` (`BodyStmt.Let` nodes).
   */
 final case class RawBody(
-  letBindings: List[(String, BodyExpr)],
   result: BodyExpr,
   stmts: List[BodyStmt] = Nil,
 )

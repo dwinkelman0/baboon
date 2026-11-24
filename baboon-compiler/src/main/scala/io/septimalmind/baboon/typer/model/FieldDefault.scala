@@ -37,15 +37,6 @@ object FieldDefault {
 
   final case class Fn(fn: TypedFn) extends FieldDefault
 
-  private def renderString(s: String): String = {
-    val escaped = s.flatMap {
-      case '"'  => "\\\""
-      case '\\' => "\\\\"
-      case '\n' => "\\n"
-      case '\r' => "\\r"
-      case '\t' => "\\t"
-      case c    => c.toString
-    }
-    s"\"$escaped\""
-  }
+  private def renderString(s: String): String =
+    DefaultLiteralSupport.quoted(s)
 }

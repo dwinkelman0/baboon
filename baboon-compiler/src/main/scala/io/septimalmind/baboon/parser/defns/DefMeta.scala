@@ -89,10 +89,7 @@ class DefMeta(context: ParserContext) {
     */
   def specialMarker[$: P]: P[RawSpecial] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
-    P("#" ~ idt.symbol).filter(s => s == "Assertion" || s == "Provenance").map {
-      case "Assertion" => RawSpecial.Assertion
-      case _           => RawSpecial.Provenance
-    }
+    P("#" ~ idt.symbol).filter(s => RawSpecial.fromString(s).isDefined).map(s => RawSpecial.fromString(s).get)
   }
 
 }

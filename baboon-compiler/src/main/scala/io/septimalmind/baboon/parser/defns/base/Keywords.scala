@@ -45,6 +45,27 @@ trait Keywords {
   def migrate[$: P]: P[Unit]     = kw("migrate")
   def `if`[$: P]: P[Unit]        = kw("if")
   def `else`[$: P]: P[Unit]      = kw("else")
+  def capture[$: P]: P[Unit]     = kw("capture")
+  def assert[$: P]: P[Unit]      = kw("assert")
+  def let[$: P]: P[Unit]         = kw("let")
+  def `for`[$: P]: P[Unit]       = kw("for")
+  def in[$: P]: P[Unit]          = kw("in")
+  def `match`[$: P]: P[Unit]     = kw("match")
+  def boolTrue[$: P]: P[Unit]    = kw("true")
+  def boolFalse[$: P]: P[Unit]   = kw("false")
+  def nullLit[$: P]: P[Unit]     = kw("null")
+  def nan[$: P]: P[Unit]         = kw("nan")
+  def posInf[$: P]: P[Unit]      = kw("+inf")
+  def negInf[$: P]: P[Unit]      = kw("-inf")
+
+  /** Non-reserved name literals (NOT keywords — never match via `kw(...)`,
+    * only compared as symbol text): node `#Special` markers (validated by
+    * `RawSpecial.fromString`) and the `self` / `Self` fn-param literals.
+    */
+  val assertionName  = "Assertion"
+  val provenanceName = "Provenance"
+  val selfName       = "self"
+  val SelfName       = "Self"
 
   def apply[T](kw: => P[Unit], defparser: => P[T])(implicit v: P[?]): P[T] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace

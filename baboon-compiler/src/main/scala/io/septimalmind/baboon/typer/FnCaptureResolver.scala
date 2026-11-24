@@ -14,8 +14,7 @@ import FnTypes._
   *     and situates into the element type;
   *   - `Star` roots must sit on `lst`/`map`/`set` (`opt` payload transparent);
   *     the chain var binds the sub-path endpoint; nested stars are rejected;
-  *   - `Variant` segments are rejected (variants only match in `match` arms);
-  *   - `!old` (`isPrev`) prefixes do not exist at AST level; nothing to assert.
+  *   - `!old` prefixes do not exist at AST level; nothing to assert.
   *
   * The capture name itself binds the path **endpoint** (the situated value).
   */
@@ -28,7 +27,7 @@ object FnCaptureResolver {
     for {
       rootType <- resolveRaw(cap.rootType, schema).left.map(_.map(m => s"capture `${cap.name}`: $m"))
       rootName = rawBaseName(cap.rootType)
-      acc <- resolveSteps(cap.name, cap.path, rootType, rootName, schema, nestedStarOk = true)
+      acc <- resolveSteps(cap.name, cap.path, rootType, rootName, schema)
       (steps, endpoint, bindings) = acc
       _ <- checkBinders(cap.name, bindings)
     } yield (
@@ -57,27 +56,43 @@ object FnCaptureResolver {
     start: TypeRef,
     startOwner: String,
     schema: FnSchema,
-    nestedStarOk: Boolean,
   ): Res[(List[TypedCaptureStep], TypeRef, List[(String, ScopeEntry)])] = {
     val init: Res[Acc] = ok(Acc(Nil, start, Nil))
     val out = path.foldLeft(init) { (accR, step) =>
-      accR.flatMap(acc => resolveOne(capName, step, acc, schema, nestedStarOk))
+      accR.flatMap(acc => resolveOne(capName, step, acc, schema))
     }
     out.map(a => (a.steps.reverse, a.cur, a.bindings.reverse))
   }
 
+  // Star sub-steps are flat by type (the parser admits no nested stars), so
+  // no nesting flag is threaded; `resolveStar` reuses the flat walk below.
   private def resolveOne(
     capName: String,
     step: RawCaptureStep,
     acc: Acc,
     schema: FnSchema,
-    nestedStarOk: Boolean,
   ): Res[Acc] = step match {
     case RawCaptureStep.Single(seg) => resolveSeg(capName, seg, acc, schema)
-    case RawCaptureStep.Star(star) =>
-      if (!nestedStarOk) fail(s"capture `$capName': nested stars are not supported (chain `${star.chainName}`)")
-      else resolveStar(capName, star, acc, schema)
+    case RawCaptureStep.Star(star)  => resolveStar(capName, star, acc, schema)
   }
+
+  /** Shared `[$k]` binder (`map[K,V] -> K`, `lst/set -> i32`), situating into
+    * the element type. Single home for the top-level and star-subpath walks.
+    */
+  private def resolveKeyStep(capName: String, varName: String, acc: Acc): Res[Acc] =
+    acc.cur match {
+      case t if isCollection(t) =>
+        (for {
+          kt <- keyType(t).toRight(List(s"capture $capName: cannot bind key on $t"))
+          et <- elemType(t).toRight(List(s"capture $capName: cannot situate into $t"))
+        } yield Acc(
+          TypedCaptureStep.KeyStep(varName, kt) :: acc.steps,
+          et,
+          (varName -> (ScopeEntry.KeyVar(kt): ScopeEntry)) :: acc.bindings,
+        ))
+      case other =>
+        fail(s"capture $capName: key segment `[$varName]` on non-collection $other")
+    }
 
   private def resolveSeg(
     capName: String,
@@ -85,22 +100,7 @@ object FnCaptureResolver {
     acc: Acc,
     schema: FnSchema,
   ): Res[Acc] = seg match {
-    case RawLocatorSeg.Variant(name) =>
-      fail(s"capture `$capName`: variant `$name` is not allowed in a capture path")
-    case RawLocatorSeg.Key(varName) =>
-      acc.cur match {
-        case t if isCollection(t) =>
-          (for {
-            kt <- keyType(t).toRight(List(s"capture `$capName`: cannot bind key on $t"))
-            et <- elemType(t).toRight(List(s"capture `$capName`: cannot situate into $t"))
-          } yield Acc(
-            TypedCaptureStep.KeyStep(varName, kt) :: acc.steps,
-            et,
-            (varName -> (ScopeEntry.KeyVar(kt): ScopeEntry)) :: acc.bindings,
-          ))
-        case other =>
-          fail(s"capture `$capName`: key segment `[$varName]` on non-collection $other")
-      }
+    case RawLocatorSeg.Key(varName) => resolveKeyStep(capName, varName, acc)
     case RawLocatorSeg.Field(name) =>
       descendField(capName, name, acc.cur, schema).map { case (stepOpt, next) =>
         Acc(stepOpt.toList ::: acc.steps, next, acc.bindings)
@@ -122,7 +122,7 @@ object FnCaptureResolver {
     cur match {
       case t if isOpt(t) && name == "Some" =>
         elemType(t)
-          .toRight(List(s"capture `$capName`: cannot situate into $t"))
+          .toRight(List(s"capture $capName: cannot situate into $t"))
           .map(next => (None, next))
       case _ =>
         transparent(cur) match {
@@ -130,7 +130,7 @@ object FnCaptureResolver {
             // Still a collection after descent (map with field traversal goes
             // to the value type; nested collections stay transparent).
             elemType(t)
-              .toRight(List(s"capture `$capName`: cannot situate into $t"))
+              .toRight(List(s"capture $capName: cannot situate into $t"))
               .flatMap(et => descendField(capName, name, et, schema))
           case t =>
             dtoFields(t, schema) match {
@@ -139,10 +139,10 @@ object FnCaptureResolver {
                   case Some(f) =>
                     ok((Some(TypedCaptureStep.FieldStep(name, ownerName(t), f.tpe)), f.tpe))
                   case None =>
-                    fail(s"capture `$capName`: unknown field `$name` on $t")
+                    fail(s"capture $capName: unknown field `$name` on $t")
                 }
               case None =>
-                fail(s"capture `$capName`: no fields on $t (field `$name`)")
+                fail(s"capture $capName: no fields on $t (field `$name`)")
             }
         }
     }
@@ -165,8 +165,8 @@ object FnCaptureResolver {
   ): Res[Acc] = {
     val rooted = transparent(acc.cur)
     if (!isLst(rooted) && !isSet(rooted) && !isMap(rooted))
-      return fail(s"capture `$capName`: star chain `${star.chainName}` roots in $rooted, expected lst/map/set")
-    val elem: Res[TypeRef] = elemType(rooted).toRight(List(s"capture `$capName`: cannot iterate $rooted"))
+      return fail(s"capture $capName: star chain `${star.chainName}` roots in $rooted, expected lst/map/set")
+    val elem: Res[TypeRef] = elemType(rooted).toRight(List(s"capture $capName: cannot iterate $rooted"))
     elem.flatMap { e =>
       // Star sub-steps are flat (the parser rejects nested stars); resolve
       // them against the element type with nesting disabled, defense in depth.
@@ -182,6 +182,9 @@ object FnCaptureResolver {
     }
   }
 
+  /** Flat sub-path walk for star bodies: same single-step home (`resolveSeg`)
+    * as the top-level walk, just over bare segments instead of `Single` steps.
+    */
   private def resolveSegsFlat(
     capName: String,
     segs: List[RawLocatorSeg],
@@ -190,37 +193,9 @@ object FnCaptureResolver {
   ): Res[(List[TypedCaptureStep], TypeRef, List[(String, ScopeEntry)])] = {
     val init: Res[Acc] = ok(Acc(Nil, start, Nil))
     val out = segs.foldLeft(init) { (accR, seg) =>
-      accR.flatMap { acc =>
-        seg match {
-          case RawLocatorSeg.Variant(name) =>
-            Left(List(s"capture `$capName`: variant `$name` is not allowed in a capture path"))
-          case RawLocatorSeg.Key(varName) =>
-            acc.cur match {
-              case t if isCollection(t) =>
-                (for {
-                  kt <- keyType(t).toRight(List(s"capture `$capName`: cannot bind key on $t"))
-                  et <- elemType(t).toRight(List(s"capture `$capName`: cannot situate into $t"))
-                } yield Acc(
-                  TypedCaptureStep.KeyStep(varName, kt) :: acc.steps,
-                  et,
-                  (varName -> (ScopeEntry.KeyVar(kt): ScopeEntry)) :: acc.bindings,
-                ))
-              case other =>
-                Left(List(s"capture `$capName`: key segment `[$varName]` on non-collection $other"))
-            }
-          case RawLocatorSeg.Field(name) =>
-            descendField(capName, name, acc.cur, schema).map { case (stepOpt, next) =>
-              Acc(stepOpt.toList ::: acc.steps, next, acc.bindings)
-            }
-        }
-      }
+      accR.flatMap(acc => resolveSeg(capName, seg, acc, schema))
     }
     out.map(a => (a.steps.reverse, a.cur, a.bindings.reverse))
-  }
-
-  private def ownerName(t: TypeRef): String = t match {
-    case TypeRef.Scalar(id: TypeId.User) => id.name.name
-    case other                           => other.toString
   }
 
   private def rawBaseName(raw: RawTypeRef): String = raw match {

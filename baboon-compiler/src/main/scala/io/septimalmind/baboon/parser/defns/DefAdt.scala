@@ -104,6 +104,9 @@ class DefAdt(context: ParserContext, meta: DefMeta, defDto: DefDto, defContract:
 
   def adtEnclosed[$: P]: P[RawAdt] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    // Node prefix: special-marker only (no @capture half — RawAdt has no
+    // capture slot; see DefDto.nodePrefix). Shared via meta.specialMarker
+    // so the `#Assertion` / `#Provenance` spelling is defined once.
     P(meta.member(kw.adt, defDto.templateHead.? ~ meta.derived ~ meta.specialMarker.? ~ struct.enclosed(adt))).map {
       case (meta, name, (tps, derived, special, members)) =>
         val typeMembers     = members.collect { case Right(m) => m }

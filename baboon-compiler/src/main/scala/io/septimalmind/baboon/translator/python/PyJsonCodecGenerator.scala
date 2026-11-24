@@ -20,7 +20,7 @@ final class PyJsonCodecGenerator(
   domain: Domain,
 ) extends PyCodecTranslator {
   private val fieldSerialization: Map[TypeRef, PyFieldPlan.SerializationFeatures] = domain.defs.meta.nodes.valuesIterator.collect {
-    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    // computed fields are no-wire, excluded from JSON key set.
     case DomainMember.User(_, dto: Typedef.Dto, _, _) => dto.fields.filter(_.computed.isEmpty).map(_.tpe)
   }.flatten.toSet.iterator.map((tpe: TypeRef) => tpe -> PyFieldPlan.serializationFeatures(tpe, domain)).toMap
 
@@ -152,18 +152,18 @@ final class PyJsonCodecGenerator(
     } else {
       // Pydantic exclusions use backing attributes, not serialization aliases.
       val fieldPlans = PyFieldPlan.forDto(domain, dto)
-      // prereq 4: computed fields are no-wire, excluded from JSON key set.
+      // computed fields are no-wire, excluded from JSON key set.
       val walkedFieldAttrNames = dto.fields.filter(_.computed.isEmpty)
         .filter(f => fieldNeedsExplicitWalk(f.tpe))
         .map(f => fieldPlans(f).attributeName)
       val excludeSet = walkedFieldAttrNames.map(n => q"'$n'").join(", ")
-      // prereq 4: computed fields are no-wire, excluded from JSON key set.
+      // computed fields are no-wire, excluded from JSON key set.
       val encodePatches = dto.fields.filter(_.computed.isEmpty).collect {
         case f if fieldNeedsExplicitWalk(f.tpe) =>
           // Wire key is the ORIGINAL model name; attribute access uses the escaped Python name.
           q"obj['${fieldPlans(f).wireName}'] = ${mkJsonAnyEncoder(f.tpe, q"value.${fieldPlans(f).accessorName}")}"
       }
-      // prereq 4: computed fields are no-wire, excluded from JSON key set.
+      // computed fields are no-wire, excluded from JSON key set.
       val decodePatches = dto.fields.filter(_.computed.isEmpty).collect {
         case f if fieldNeedsExplicitWalk(f.tpe) =>
           // Wire key is the ORIGINAL model name.
@@ -184,18 +184,18 @@ final class PyJsonCodecGenerator(
   }
 
   private def hasAnyField(defn: DomainMember.User): Boolean = defn.defn match {
-    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    // computed fields are no-wire, excluded from JSON key set.
     case d: Typedef.Dto => d.fields.filter(_.computed.isEmpty).exists(f => fieldSerialization(f.tpe).hasAny)
     case _              => false
   }
 
   private def hasCustomForeignMapKey(defn: DomainMember.User): Boolean = defn.defn match {
-    // prereq 4: computed fields are no-wire, excluded from JSON key set.
+    // computed fields are no-wire, excluded from JSON key set.
     case d: Typedef.Dto => d.fields.filter(_.computed.isEmpty).exists(f => fieldSerialization(f.tpe).hasCustomForeignKey)
     case _              => false
   }
 
-  // prereq 4: computed fields are no-wire, excluded from JSON key set.
+  // computed fields are no-wire, excluded from JSON key set.
   private def dtoNeedsExplicitWalker(dto: Typedef.Dto): Boolean = dto.fields.filter(_.computed.isEmpty).exists(f => fieldNeedsExplicitWalk(f.tpe))
 
   private def fieldNeedsExplicitWalk(tpe: TypeRef): Boolean = fieldSerialization(tpe).needsExplicitWalk

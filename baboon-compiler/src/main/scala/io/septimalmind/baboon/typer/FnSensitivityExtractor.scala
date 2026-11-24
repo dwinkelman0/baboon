@@ -5,12 +5,12 @@ import io.septimalmind.baboon.typer.model.FnTypes._
 
 import scala.collection.mutable
 
-/** P4: sensitivity extraction for fn bodies (standalone; not yet wired into `BaboonTranslator`).
+/** P4: sensitivity extraction for fn bodies.
   *
   * Input: a P3 [[TypedBody]] plus the P2 [[TypedCapture]], the seed [[ScopeTable]] and the
   * owning slot (the DTO field the fn is attached to). Output: a pair of canonical
   * [[Sensitivity]] values — `read` (leaf field-level reads, shape reads and
-  * always-empty prev reads) and `write` (field writes as leaf paths plus the
+  * always-empty reads) and `write` (field writes as leaf paths plus the
   * written owners as shape reads, so overlap checks stay purely on
   * [[Sensitivity]]). The single-`isPrev`-flag [[SchemaPath]] and the
   * owner-keyed `prevReads` live in the model; `!old` has no AST representation
@@ -55,7 +55,7 @@ object FnSensitivityExtractor {
   def structWrites(owner: TypeId.User, schema: FnSchema): List[SchemaPath] =
     dtoFields(TypeRef.Scalar(owner), schema)
       .getOrElse(Nil)
-      .map(f => SchemaPath(owner, isPrev = false, List(SchemaStep.FieldStep(f.name, owner, f.tpe))))
+      .map(f => SchemaPath(owner, List(SchemaStep.FieldStep(f.name, owner, f.tpe))))
 
   // -- driver ---------------------------------------------------------------
 
@@ -77,6 +77,10 @@ object FnSensitivityExtractor {
   ) {
     private val writes = mutable.LinkedHashSet.empty[SchemaPath]
     private val errors = mutable.ListBuffer.empty[String]
+    private lazy val starCapture: Boolean = capture.exists(_.path.exists {
+      case _: TypedCaptureStep.StarStep => true
+      case _                            => false
+    })
 
     private type LeafB  = mutable.Set[SchemaPath]
     private type ShapeB = mutable.Set[TypeId.User]
@@ -95,8 +99,8 @@ object FnSensitivityExtractor {
       (leafB.toSet ++ writes.toSet).foreach(validate)
       if (errors.nonEmpty) Left(errors.toList.distinct)
       else {
-        val read  = Sensitivity(leafB.toSet, shapeB.toSet, Set.empty)
-        val write = Sensitivity(writes.toSet, writes.toSet.map((p: SchemaPath) => p.root), Set.empty)
+        val read  = Sensitivity(leafB.toSet, shapeB.toSet)
+        val write = Sensitivity(writes.toSet, writes.toSet.map((p: SchemaPath) => p.root))
         Right((read, write))
       }
     }
@@ -136,23 +140,20 @@ object FnSensitivityExtractor {
         case TypedExpr.Lit(_, _) => ()
         case p: TypedExpr.Path =>
           pathRead(p, ctx, visiting, leafB, shapeB, leafB += _)
-        case TypedExpr.Call(target, _, args, _) =>
-          expr(target, ctx, visiting, leafB, shapeB)
-          args.foreach(expr(_, ctx, visiting, leafB, shapeB))
-          shapeB ++= shapeOf(target.tpe)
-        case TypedExpr.UserCall(target, _, args, _) =>
-          expr(target, ctx, visiting, leafB, shapeB)
-          args.foreach(expr(_, ctx, visiting, leafB, shapeB))
-          shapeB ++= shapeOf(target.tpe)
-        case TypedExpr.BinOp(_, l, r, _) =>
-          expr(l, ctx, visiting, leafB, shapeB)
-          expr(r, ctx, visiting, leafB, shapeB)
-        case TypedExpr.UnaryOp(_, x, _) =>
-          expr(x, ctx, visiting, leafB, shapeB)
-        case TypedExpr.If(cond, t, el, _) =>
-          expr(cond, ctx, visiting, leafB, shapeB)
-          expr(t, ctx, visiting, leafB, shapeB)
-          expr(el, ctx, visiting, leafB, shapeB)
+        // Context-free shapes route through the shared child visitor; only
+        // binding/assignment forms below need bespoke handling.
+        case c: TypedExpr.Call =>
+          TypedExpr.children(c).foreach(expr(_, ctx, visiting, leafB, shapeB))
+          shapeB ++= shapeOf(c.target.tpe)
+        case u: TypedExpr.UserCall =>
+          TypedExpr.children(u).foreach(expr(_, ctx, visiting, leafB, shapeB))
+          shapeB ++= shapeOf(u.target.tpe)
+        case b: TypedExpr.BinOp =>
+          TypedExpr.children(b).foreach(expr(_, ctx, visiting, leafB, shapeB))
+        case u: TypedExpr.UnaryOp =>
+          TypedExpr.children(u).foreach(expr(_, ctx, visiting, leafB, shapeB))
+        case i: TypedExpr.If =>
+          TypedExpr.children(i).foreach(expr(_, ctx, visiting, leafB, shapeB))
         case TypedExpr.Assign(target, value, _) =>
           expr(value, ctx, visiting, leafB, shapeB)
           assignWrite(target, ctx, visiting, leafB, shapeB)
@@ -196,13 +197,16 @@ object FnSensitivityExtractor {
 
     // -- reads --------------------------------------------------------------
 
+    // Dual-use emitter (the one explicit callback): normal reads emit into
+    // the body `leafB`; field-write targeting emits into a temp that becomes
+    // `writes`. Call sites pass the buffer explicitly (`leafB += _`).
     private def pathRead(
       p: TypedExpr.Path,
       ctx: Ctx,
       visiting: Set[String],
       leafB: LeafB,
       shapeB: ShapeB,
-      add: SchemaPath => Unit
+      emit: SchemaPath => Unit
     ): Unit = {
       p.segments.foreach {
         case TypedPathSeg.Index(idx, _) => expr(idx, ctx, visiting, leafB, shapeB)
@@ -211,7 +215,7 @@ object FnSensitivityExtractor {
       val segNames = p.segments.collect { case TypedPathSeg.Field(n, _) => n }
       def extendFrom(base: SchemaPath): Unit =
         SchemaPath.extend(base, segNames, schema) match {
-          case Right(full) => add(full)
+          case Right(full) => emit(full)
           case Left(m)     => errors += m
         }
       ctx.scope.get(p.root) match {
@@ -225,12 +229,12 @@ object FnSensitivityExtractor {
               captureBase(c) match {
                 case None => ()
                 case Some((owner, base)) =>
-                  if (isStarCapture(c)) shapeB += owner
+                  if (starCapture) shapeB += owner
                   extendFrom(base)
               }
           }
         case Some(ScopeEntry.Param(_)) if p.root == "self" =>
-          if (segNames.nonEmpty) extendFrom(SchemaPath(attachment.owner, isPrev = false, Nil))
+          if (segNames.nonEmpty) extendFrom(SchemaPath(attachment.owner, Nil))
         case Some(ScopeEntry.Param(_)) =>
           () // call-site values (extra fn params): local only, no field leafReads
         case Some(ScopeEntry.LetBinding(_)) if ctx.lets.contains(p.root) && !visiting.contains(p.root) =>
@@ -241,10 +245,10 @@ object FnSensitivityExtractor {
           tmpL.foreach(l => extendFrom(l))
           shapeB ++= tmpS
         case Some(ScopeEntry.LetBinding(t)) =>
-          userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
+          userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, Nil)))
         case Some(ScopeEntry.KeyVar(t)) =>
           // Read-only capture key var: readable, extends like a local value.
-          userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, isPrev = false, Nil)))
+          userOwner(t).foreach(o => if (segNames.nonEmpty) extendFrom(SchemaPath(o, Nil)))
         case Some(ScopeEntry.StarChain(_)) =>
           capture match {
             case None =>
@@ -361,12 +365,6 @@ object FnSensitivityExtractor {
         case None                                       => None
       }
 
-    private def isStarCapture(c: TypedCapture): Boolean =
-      c.path.exists {
-        case _: TypedCaptureStep.StarStep => true
-        case _                            => false
-      }
-
     /** Ordered steps of a capture path: plain fields plus star-substep fields. */
     private def captureSteps(c: TypedCapture): Option[List[SchemaStep]] = {
       val out = List.newBuilder[SchemaStep]
@@ -390,7 +388,7 @@ object FnSensitivityExtractor {
 
     private def captureBase(c: TypedCapture): Option[(TypeId.User, SchemaPath)] =
       userOwner(c.rootType).flatMap { owner =>
-        captureSteps(c).map(steps => (owner, SchemaPath(owner, isPrev = false, steps)))
+        captureSteps(c).map(steps => (owner, SchemaPath(owner, steps)))
       }
 
     /** Split a capture at a star chain: root owner plus the fields before the
@@ -423,7 +421,7 @@ object FnSensitivityExtractor {
               }
             case _ => ()
           }
-          if (ok) Some((owner, SchemaPath(owner, isPrev = false, out.result()))) else None
+          if (ok) Some((owner, SchemaPath(owner, out.result()))) else None
         }
       }
   }

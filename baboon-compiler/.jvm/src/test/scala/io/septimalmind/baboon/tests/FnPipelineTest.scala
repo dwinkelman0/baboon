@@ -69,7 +69,7 @@ final class FnPipelineTest extends AnyWordSpec {
   private def letU(name: String, v: BodyExpr): BodyStmt = BodyStmt.Let(name, None, v)
 
   private def rawBody(stmts: List[BodyStmt], result: BodyExpr): RawBody =
-    RawBody(stmts.collect { case BodyStmt.Let(n, _, v) => (n, v) }, result, stmts)
+    RawBody(result, stmts)
 
   private def fn0(selfTpe: String, stmts: List[BodyStmt], result: BodyExpr): RawFn =
     RawFn(Nil, List(RawFnParam("self", rt(selfTpe))), rawBody(stmts, result))
@@ -107,6 +107,22 @@ final class FnPipelineTest extends AnyWordSpec {
     expected: String = "i32",
     sources: Set[SchemaPath] = Set.empty,
   ): FnSiteInputs = FnSiteInputs(fn, owner, f, role, rt(expected), sources, schema, nodeCapture = Some(nodeCap))
+
+  /** Explicit-gcRoot variant: marks `owner` in `schema.roots` so the
+    * ancestry rule treats it as instantiable-without-a-parent even when the
+    * static parent graph shows incoming edges.
+    */
+  private def inRoot(
+    owner: String,
+    f: String,
+    role: FnRole,
+    fn: RawFn,
+    expected: String = "i32",
+    sources: Set[SchemaPath] = Set.empty,
+  ): FnSiteInputs = {
+    val base = in(owner, f, role, fn, expected, sources)
+    base.copy(schema = base.schema.copy(roots = base.schema.roots + owner))
+  }
 
   private def mustAssemble(sites: List[FnSiteInputs]): ValidatedFnProgram =
     FnPipeline.assemble(sites) match {
@@ -171,14 +187,14 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(p.emissionOrder.nodes.isEmpty)
     }
 
-    "keep prevReads empty on success (deferred-prev invariant)" in {
+    "assemble successfully without prev reads (deferred-prev invariant)" in {
       val sites = List(
         in("Child", "count", FnRole.Default, fn0("Child", Nil, path("self", fld("total")))),
         in("Child", "grand", FnRole.Computed, fn0("Child", Nil, path("self", fld("total")))),
       )
       val p = mustAssemble(sites)
       p.fns.foreach { case (site, _, sens) =>
-        assert(sens.prevReads.isEmpty, s"${site.id} has prev reads: ${sens.prevReads}")
+        assert(sens.leafReads.nonEmpty || sens.shapeReads.isEmpty, s"${site.id}")
       }
     }
 
@@ -191,7 +207,6 @@ final class FnPipelineTest extends AnyWordSpec {
       assert(p.fns.size == 1)
       val (_, _, sens) = p.fns.head
       assert(sens.leafReads == Set(sp("Child", "count")), s"extra param leaked into leafReads: ${sens.leafReads}")
-      assert(sens.prevReads.isEmpty)
     }
 
     "cover every fn node in the emission order" in {
@@ -201,7 +216,7 @@ final class FnPipelineTest extends AnyWordSpec {
       )
       val p = mustAssemble(sites)
       val ordered = renders(p).toSet
-      p.fns.foreach { case (site, _: FnPipeline.TypedFn, _) =>
+      p.fns.foreach { case (site, _: TypedFn, _) =>
         val id = site.id
         assert(
           ordered.exists(_.contains(s"${id.field}")),
@@ -364,14 +379,14 @@ final class FnPipelineTest extends AnyWordSpec {
       // Shop statically dominates Item, but a gcRoot Item can exist
       // parentless at runtime, so the capture would dangle.
       val fn = fnCap(cap1("s", "Shop"), "Item", Nil, path("s", fld("basket"), fld("a")))
-      val site = in("Item", "qty", FnRole.Computed, fn).copy(ownerIsRoot = true)
+      val site = inRoot("Item", "qty", FnRole.Computed, fn)
       val errs = mustFail(List(site))
       assert(errs.exists(_.contains("may be instantiated without a parent")), errs.mkString("; "))
     }
 
     "reject a self-capture on an explicit gcRoot (Item capturing Item) as redundant" in {
       val fn = fnCap(cap1("s", "Item"), "Item", Nil, path("s", fld("price")))
-      val site = in("Item", "qty", FnRole.Computed, fn).copy(ownerIsRoot = true)
+      val site = inRoot("Item", "qty", FnRole.Computed, fn)
       val errs = mustFail(List(site))
       assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
     }
@@ -379,7 +394,7 @@ final class FnPipelineTest extends AnyWordSpec {
     "pass a root fn with no capture (explicit gcRoot, parentless Shop)" in {
       val p1 = mustAssemble(List(in("Child", "grand", FnRole.Computed, fn0("Child", Nil, path("self", fld("total"))))))
       assert(p1.fns.size == 1)
-      val site = in("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("self", fld("price")))).copy(ownerIsRoot = true)
+      val site = inRoot("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("self", fld("price"))))
       val p2 = mustAssemble(List(site))
       assert(p2.fns.size == 1)
     }

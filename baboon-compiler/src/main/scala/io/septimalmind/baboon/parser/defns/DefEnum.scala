@@ -55,6 +55,9 @@ class DefEnum(@unused context: ParserContext, meta: DefMeta) {
 
   def enumEnclosed[$: P]: P[RawEnum] = {
     import io.septimalmind.baboon.parser.defns.base.BaboonWhitespace.whitespace
+    // Node prefix: special-marker only (no @capture half — RawEnum has no
+    // capture slot; see DefDto.nodePrefix). Shared via meta.specialMarker
+    // so the `#Assertion` / `#Provenance` spelling is defined once.
     P(meta.member(kw.choice, meta.derived ~ meta.specialMarker.? ~ struct.enclosed(defEnum(sepEnum)))).map {
       case (meta, name, (derived, special, members)) => RawEnum(RawTypeName(name), members, derived, meta, special)
     }

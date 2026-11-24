@@ -61,10 +61,10 @@ final class FnOrderingTest extends AnyWordSpec {
     writes: Set[SchemaPath] = Set.empty,
     shape: Set[TypeId.User] = Set.empty
   ): (Sensitivity, Sensitivity) =
-    (Sensitivity(reads, shape, Set.empty), Sensitivity(writes, writes.map(_.root), Set.empty))
+    (Sensitivity(reads, shape), Sensitivity(writes, writes.map(_.root)))
 
   private def rawFn: RawFn =
-    RawFn(Nil, Nil, RawBody(Nil, BodyExpr.Lit(BodyLiteral.IntLit(0))))
+    RawFn(Nil, Nil, RawBody(BodyExpr.Lit(BodyLiteral.IntLit(0)), Nil))
 
   private def site(owner: String, f: String, role: FnRole): FnSite =
     FnSite(FnSiteId(owner, f, role), rawFn)
@@ -174,11 +174,11 @@ final class FnOrderingTest extends AnyWordSpec {
 
     "reject unknown field reads" in {
       val scope = SchemaPath.resolve(uid("Basket"), List("total"), schema).toOption.get
-      val badRead = SchemaPath(uid("Basket"), isPrev = false, List(
+      val badRead = SchemaPath(uid("Basket"), List(
         SchemaStep.FieldStep(FieldName("nope"), uid("Basket"), i32)
       ))
       val ins = List(
-        gateIn("Basket", "total", FnRole.Default, (Sensitivity(Set(badRead), Set.empty, Set.empty), Sensitivity(Set(scope), Set(uid("Basket")), Set.empty)))
+        gateIn("Basket", "total", FnRole.Default, (Sensitivity(Set(badRead), Set.empty), Sensitivity(Set(scope), Set(uid("Basket")))))
       )
       val errs = mustFailGate(ins)
       assert(errs.exists(e => e.contains("unknown field") && e.contains("nope")), errs.mkString("; "))

@@ -12,7 +12,7 @@ Targets:
 
 * default (project) target: ``<checkout>/src/spaced_repetition.baboon``
   -> ``<checkout>/models/python`` in the outer ``baboon-test`` checkout
-  (parent of this repo root; kept for backward compat).
+  (parent of this repo root).
 * ``--study power_arch1``: single-context codegen — every versioned
   ``models/v*/soc.baboon`` schema is passed together via repeatable
   ``--model-dir <version-dir>`` flags and rendered once into the single
@@ -50,9 +50,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ROOT is this git repo's root (baboon/scripts/../ = baboon/). The default
-# (non-study) project target lives in the outer `baboon-test` checkout, i.e.
-# the parent of ROOT — kept for backward compat with the script's previous
-# location at <checkout>/scripts/codegen.py.
+# (non-study) project target lives in the outer `baboon-test` checkout (parent
+# of ROOT, kept for backward compat).
 OUTER_ROOT = os.path.dirname(ROOT)
 
 STUDY_DIR = os.path.join(ROOT, "studies", "power_arch1")

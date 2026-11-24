@@ -593,27 +593,7 @@ object PyDefnTranslator {
               // pure path by wrapping the helper call.
               val defaultFactory = defaultLowering.flatMap(_.factory)
               val defaultValue   = defaultLowering.map(_.tree).filter(_ => defaultFactory.isEmpty)
-              val fieldTree = (plan.needsAlias, defaultValue, defaultFactory) match {
-                case (true, _, Some(PyDefaultFactory(helper, Nil))) =>
-                  q"${plan.attributeName}: $fieldType = $pydanticField(default_factory=$helper, alias='$fieldName', serialization_alias='$fieldName')"
-                case (false, _, Some(PyDefaultFactory(helper, Nil))) =>
-                  q"${plan.attributeName}: $fieldType = $pydanticField(default_factory=$helper)"
-                case (_, _, Some(PyDefaultFactory(helper, args))) =>
-                  val callArgs = args.map(escapePyKeyword).mkString(", ")
-                  val wrapped  = q"(lambda $callArgs: $helper($callArgs))"
-                  if (plan.needsAlias)
-                    q"${plan.attributeName}: $fieldType = $pydanticField(default=$wrapped, alias='$fieldName', serialization_alias='$fieldName')"
-                  else
-                    q"${plan.attributeName}: $fieldType = $wrapped"
-                case (true, Some(dv), None) =>
-                  q"${plan.attributeName}: $fieldType = $pydanticField(default=$dv, alias='$fieldName', serialization_alias='$fieldName')"
-                case (true, None, None) =>
-                  q"${plan.attributeName}: $fieldType = $pydanticField(alias='$fieldName', serialization_alias='$fieldName')"
-                case (false, Some(dv), None) =>
-                  q"${plan.attributeName}: $fieldType = $dv"
-                case (false, None, None) =>
-                  q"${plan.attributeName}: $fieldType"
-              }
+              val fieldTree      = fieldDecl(plan, fieldType, defaultValue, defaultFactory)
               // `@normalize` runs as a post-init/read hook after construction
               // (see `renderPyNormalizeValidator`). Nested DTOs validate (and
               // normalize) themselves before the parent's hook runs, so
@@ -634,17 +614,8 @@ object PyDefnTranslator {
       )
     }
 
-    private def renderPyString(s: String): String = {
-      val escaped = s.flatMap {
-        case '"'  => "\\\""
-        case '\\' => "\\\\"
-        case '\n' => "\\n"
-        case '\r' => "\\r"
-        case '\t' => "\\t"
-        case c    => c.toString
-      }
-      s"\"$escaped\""
-    }
+    private def renderPyString(s: String): String =
+      DefaultLiteralSupport.quoted(s)
 
     private final case class PyDefaultFactory(helperName: String, captureArgs: List[String])
     private final case class PyDefaultLowering(
@@ -655,29 +626,53 @@ object PyDefnTranslator {
 
     private def renderPyDefault(fd: FieldDefault, ownerClass: String, field: Field): PyDefaultLowering = {
       def leaf(tree: TextTree[PyValue]): PyDefaultLowering = PyDefaultLowering(tree, Nil)
-      fd match {
-        case FieldDefault.IntVal(_, raw, _) =>
-          leaf(q"$raw")
-        case FieldDefault.FloatVal(_, raw) =>
-          leaf(q"$raw")
-        case FieldDefault.BoolVal(true)  => leaf(q"True")
-        case FieldDefault.BoolVal(false) => leaf(q"False")
-        case FieldDefault.StrVal(value) =>
-          leaf(q"${renderPyString(value)}")
-        case FieldDefault.NullVal =>
-          leaf(q"None")
-        case FieldDefault.EnumVal(memberName) =>
-          val enumTpe     = domainTypes.asPyType(field.tpe.id, fileTools.definitionsBasePkg)
-          val memberIdent = escapePyKeyword(memberName.split('.').last)
-          leaf(q"$enumTpe.$memberIdent")
-        case FieldDefault.SpecialFloatVal(kind) =>
-          kind match {
-            case FieldDefault.SpecialFloatKind.NaN    => leaf(q"float('nan')")
-            case FieldDefault.SpecialFloatKind.PosInf => leaf(q"float('inf')")
-            case FieldDefault.SpecialFloatKind.NegInf => leaf(q"float('-inf')")
+      def resolveEnum(shortName: String): String = {
+        val enumTpe     = domainTypes.asPyType(field.tpe.id, fileTools.definitionsBasePkg)
+        val memberIdent = escapePyKeyword(shortName)
+        s"${enumTpe.name}.$memberIdent"
+      }
+      DefaultLiteralSupport.literal(fd, DefaultLiteralSupport.pythonLiterals, resolveEnum) match {
+        case Some(src) =>
+          leaf(q"$src")
+        case None =>
+          fd match {
+            case FieldDefault.Fn(fn) =>
+              renderPyDefaultFn(fn, ownerClass, field)
+            case other =>
+              sys.error(s"BUG: DefaultLiteralSupport.literal returned None for non-fn default $other")
           }
-        case FieldDefault.Fn(fn) =>
-          renderPyDefaultFn(fn, ownerClass, field)
+      }
+    }
+
+    // One field-declaration shape: alias matrix crossed with default value/factory.
+    // (Ts has the same concept under the same name for constructor params.)
+    private def fieldDecl(
+      plan: PyFieldPlan,
+      fieldType: TextTree[PyValue],
+      defaultValue: Option[TextTree[PyValue]],
+      defaultFactory: Option[PyDefaultFactory],
+    ): TextTree[PyValue] = {
+      val fieldName = plan.wireName
+      (plan.needsAlias, defaultValue, defaultFactory) match {
+        case (true, _, Some(PyDefaultFactory(helper, Nil))) =>
+          q"${plan.attributeName}: $fieldType = $pydanticField(default_factory=$helper, alias='$fieldName', serialization_alias='$fieldName')"
+        case (false, _, Some(PyDefaultFactory(helper, Nil))) =>
+          q"${plan.attributeName}: $fieldType = $pydanticField(default_factory=$helper)"
+        case (_, _, Some(PyDefaultFactory(helper, args))) =>
+          val callArgs = args.map(escapePyKeyword).mkString(", ")
+          val wrapped  = q"(lambda $callArgs: $helper($callArgs))"
+          if (plan.needsAlias)
+            q"${plan.attributeName}: $fieldType = $pydanticField(default=$wrapped, alias='$fieldName', serialization_alias='$fieldName')"
+          else
+            q"${plan.attributeName}: $fieldType = $wrapped"
+        case (true, Some(dv), None) =>
+          q"${plan.attributeName}: $fieldType = $pydanticField(default=$dv, alias='$fieldName', serialization_alias='$fieldName')"
+        case (true, None, None) =>
+          q"${plan.attributeName}: $fieldType = $pydanticField(alias='$fieldName', serialization_alias='$fieldName')"
+        case (false, Some(dv), None) =>
+          q"${plan.attributeName}: $fieldType = $dv"
+        case (false, None, None) =>
+          q"${plan.attributeName}: $fieldType"
       }
     }
 

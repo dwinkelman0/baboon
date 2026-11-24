@@ -330,13 +330,7 @@ object TsDefnTranslator {
       // RHS reference must agree. The private field (`_${name}`) and all object-literal/member-access wire
       // keys keep the raw name, so the wire format is unchanged.
       val constrcutorParams =
-        dto.fields.map {
-          f =>
-            val paramName = typeTranslator.escapeTsKeyword(f.name.name)
-            val paramType = domainTypes.asTsRef(f.tpe, tsFileTools.definitionsBasePkg)
-            val defaultInit = f.default.map(d => q" = ${renderTsDefault(d, f)}").getOrElse(q"")
-            q"$paramName: $paramType$defaultInit"
-        }.join(", ")
+        dto.fields.map(f => fieldDecl(f)).join(", ")
 
       val constructorInside = fieldsNameAndType.map {
         case (n, _) =>
@@ -345,7 +339,7 @@ object TsDefnTranslator {
 
       val implementsClause = if (parents.nonEmpty) q"implements ${parents.map(tpe => q"$tpe").join(", ")}" else q""
 
-      // prereq 4: computed fields are no-wire, excluded from JSON key set (toJSON wire view).
+      // computed fields are no-wire, excluded from JSON key set (toJSON wire view).
       val toJsonFields = dto.fields.filter(_.computed.isEmpty).map {
         f =>
           val ref = s"this._${f.name.name}"
@@ -885,45 +879,37 @@ object TsDefnTranslator {
          |} as const;""".stripMargin
     }
 
-    private def renderTsString(s: String): String = {
-      val escaped = s.flatMap {
-        case '"'  => "\\\""
-        case '\\' => "\\\\"
-        case '\n' => "\\n"
-        case '\r' => "\\r"
-        case '\t' => "\\t"
-        case c    => c.toString
-      }
-      s"\"$escaped\""
-    }
+    private def renderTsString(s: String): String =
+      DefaultLiteralSupport.quoted(s)
 
     private def renderTsDefault(fd: FieldDefault, field: Field): TextTree[TsValue] = {
-      fd match {
-        case FieldDefault.IntVal(_, raw, _) =>
-          q"$raw"
-        case FieldDefault.FloatVal(_, raw) =>
-          q"$raw"
-        case FieldDefault.BoolVal(true)  => q"true"
-        case FieldDefault.BoolVal(false) => q"false"
-        case FieldDefault.StrVal(value) =>
-          q"${renderTsString(value)}"
-        case FieldDefault.NullVal =>
-          q"null"
-        case FieldDefault.EnumVal(memberName) =>
-          val enumTpe     = domainTypes.asTsType(field.tpe.id, tsFileTools.definitionsBasePkg)
-          val memberIdent = typeTranslator.escapeTsKeyword(memberName.split('.').last)
-          q"$enumTpe.$memberIdent"
-        case FieldDefault.SpecialFloatVal(kind) =>
-          kind match {
-            case FieldDefault.SpecialFloatKind.NaN    => q"NaN"
-            case FieldDefault.SpecialFloatKind.PosInf => q"Infinity"
-            case FieldDefault.SpecialFloatKind.NegInf => q"-Infinity"
-          }
-        // Unreachable until Fn is lowered for this backend (typer gates reject
-        // FieldDefault.Fn before backends run); kept exhaustive per P1.
-        case FieldDefault.Fn(_) =>
-          sys.error("FieldDefault.Fn defaults are not yet lowered for the typescript backend")
+      def resolveEnum(shortName: String): String = {
+        val enumTpe     = domainTypes.asTsType(field.tpe.id, tsFileTools.definitionsBasePkg)
+        val memberIdent = typeTranslator.escapeTsKeyword(shortName)
+        s"${enumTpe.name}.$memberIdent"
       }
+      DefaultLiteralSupport.literal(fd, DefaultLiteralSupport.typeScriptLiterals, resolveEnum) match {
+        case Some(src) =>
+          q"$src"
+        case None =>
+          // Unreachable until Fn is lowered for this backend (typer gates reject
+          // FieldDefault.Fn before backends run); kept exhaustive per P1.
+          fd match {
+            case FieldDefault.Fn(_) =>
+              sys.error("FieldDefault.Fn defaults are not yet lowered for the typescript backend")
+            case other =>
+              sys.error(s"BUG: DefaultLiteralSupport.literal returned None for non-fn default $other")
+          }
+      }
+    }
+
+    // One field-declaration shape: a constructor param with an optional default
+    // initializer. (Py has the same concept under the same name for pydantic fields.)
+    private def fieldDecl(f: Field): TextTree[TsValue] = {
+      val paramName   = typeTranslator.escapeTsKeyword(f.name.name)
+      val paramType   = domainTypes.asTsRef(f.tpe, tsFileTools.definitionsBasePkg)
+      val defaultInit = f.default.map(d => q" = ${renderTsDefault(d, f)}").getOrElse(q"")
+      q"$paramName: $paramType$defaultInit"
     }
 
     private def getOutputPath(defn: DomainMember.User, suffix: Option[String] = None): String = {

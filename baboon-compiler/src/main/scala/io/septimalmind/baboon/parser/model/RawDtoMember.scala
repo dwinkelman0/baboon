@@ -20,8 +20,27 @@ object RawDtoMember {
     * (`area: f32 = fn(self) { ... }`). The typer intentionally rejects
     * these with `VerificationIssue.FnNotSupported` until function bodies are
     * lowered to a backend.
+    *
+    * Single source of truth: the computed fn lives in `fn` (backed by
+    * `field.fn`). `@default(fn(...))` on plain `FieldDef`s populates the
+    * same `field.fn` slot (with `field.default = None`); the member wrapper
+    * tells the roles apart (`FieldDef` + fn => `Default`, `FnProperty` =>
+    * `Computed`). `RawDefaultValue.Fn` is only produced transiently by the
+    * `@default` grammar and remapped into `field.fn` at parse time.
     */
-  case class FnProperty(field: RawField, meta: RawNodeMeta) extends RawDtoMember
+  case class FnProperty(field: RawField, meta: RawNodeMeta) extends RawDtoMember {
+
+    /** First-class accessor for the computed fn. Total by construction:
+      * the parser always populates `field.fn` for properties.
+      */
+    def fn: RawFn = field.fn.getOrElse(
+      throw new IllegalStateException(s"FnProperty without fn initializer: $field")
+    )
+  }
+
+  object FnProperty {
+    // `FnProperty.fn` is the single read path; no legacy dual-encoding shim.
+  }
 
   /** PR-33.9 (M33): typer-internal carrier for a `RawDtoMember.FieldDef` whose origin is a
     * template-arm inline expansion (`+ Template[Args]` lowered by `TemplateInstantiator`).

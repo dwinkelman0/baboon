@@ -48,12 +48,18 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     }
   }
 
-  private def unwrapFn(default: Option[RawDefaultValue]): RawFn = {
-    default match {
-      case Some(RawDefaultValue.Fn(fn)) => fn
-      case other => fail(s"expected RawDefaultValue.Fn, got $other")
+  private def unwrapFn(fn: Option[RawFn]): RawFn = {
+    fn match {
+      case Some(f) => f
+      case other => fail(s"expected Some(RawFn), got $other")
     }
   }
+
+  /** Type-erased view of top-level `let` bindings, derived from `stmts`
+    * (`RawBody` no longer carries a separate `letBindings` list).
+    */
+  private def letsOf(fn: RawFn): List[(String, BodyExpr)] =
+    fn.body.stmts.collect { case BodyStmt.Let(n, _, v) => (n, v) }
 
   private def assertSimpleType(tpe: RawTypeRef, name: String): Unit = {
     assert(tpe == RawTypeRef.Simple(RawTypeName(name), Nil), s"expected simple type $name, got $tpe")
@@ -80,18 +86,18 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse @default(fn[p: Parent]() { p.name })" in {
       val f = onlyField("data D { @default(fn[p: Parent]() { p.name }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "p")
       assertSimpleType(fn.captures.head.rootType, "Parent")
       assert(fn.params.isEmpty)
-      assert(fn.body.letBindings.isEmpty)
+      assert(letsOf(fn).isEmpty)
       assert(fn.body.result == BodyExpr.Path("p", List(BodyExpr.Segment.Field("name"))))
     }
 
     "parse @default(fn[p: Parent](self) { self.x })" in {
       val f = onlyField("data D { @default(fn[p: Parent](self) { self.x }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "p")
       assert(fn.params.size == 1)
@@ -131,7 +137,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse a read-only fn property" in {
       val p = onlyProperty("data D { area: f32 = fn(self) { self.width * self.height } }")
-      val fn = unwrapFn(p.field.default)
+      val fn = p.fn
       assert(p.field.name == RawFieldName("area"))
       assertSimpleType(p.field.tpe, "f32")
       assert(fn.params.size == 1)
@@ -145,12 +151,12 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "accept the legacy self: Self alias the same as bare self" in {
       val p = onlyProperty("data D { area: f32 = fn(self: Self) { self.width * self.height } }")
-      val fn = unwrapFn(p.field.default)
+      val fn = p.fn
       assert(fn.params.size == 1)
       assert(fn.params.head.name == "self")
       assertSimpleType(fn.params.head.tpe, "Self")
       val bare = onlyProperty("data D { area: f32 = fn(self) { self.width * self.height } }")
-      assert(unwrapFn(bare.field.default).params == fn.params)
+      assert(bare.fn.params == fn.params)
     }
 
     "parse a computed fn whose capture situates the container" in {
@@ -160,7 +166,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       // instance itself — contrast `@normalize` / `@default(fn)`, where
       // `self` is the field's own value. Parser-level only: roles resolve in P2.
       val p = onlyProperty("data D { area: f32 = fn[s: MyStruct.member](self) { self.width } }")
-      val fn = unwrapFn(p.field.default)
+      val fn = p.fn
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "s")
       assertSimpleType(fn.captures.head.rootType, "MyStruct")
@@ -171,10 +177,10 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse a body with let bindings and method call" in {
       val f = onlyField("data D { @default(fn[self: Self]() { let a = self.x; let b = a.uppercase(); b }) x: str }")
-      val fn = unwrapFn(f.field.default)
-      assert(fn.body.letBindings.size == 2)
-      assert(fn.body.letBindings.head == ("a", BodyExpr.Path("self", List(BodyExpr.Segment.Field("x")))))
-      assert(fn.body.letBindings.tail.head == ("b", BodyExpr.Call(
+      val fn = unwrapFn(f.field.fn)
+      assert(letsOf(fn).size == 2)
+      assert(letsOf(fn).head == ("a", BodyExpr.Path("self", List(BodyExpr.Segment.Field("x")))))
+      assert(letsOf(fn).tail.head == ("b", BodyExpr.Call(
         BodyExpr.Path("a", Nil),
         "uppercase",
         Nil,
@@ -184,7 +190,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse a star capture" in {
       val f = onlyField("data D { @default(fn[s: MyStruct($chain* : .objs[$idx])]() { s }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.size == 1)
       val cap = fn.captures.head
       assert(cap.name == "s")
@@ -198,7 +204,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse a locator with a key segment" in {
       val f = onlyField("data D { @default(fn[p: Parent.entries[$k].prop]() { p }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("entries")),
         RawCaptureStep.Single(RawLocatorSeg.Key("k")),
@@ -208,14 +214,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse literal expressions" in {
       val f = onlyField("data D { @default(fn[self: Self]() { 42 + 3.14 == true && !false || null.concat(\"x\") }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       // Just ensure it parses to a non-trivial expression.
       assert(fn.body.result.isInstanceOf[BodyExpr.BinOp])
     }
 
     "parse an if/else expression" in {
       val f = onlyField("data D { @default(fn[self: Self]() { if self.x { 1 } else { 2 } }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result.isInstanceOf[BodyExpr.If])
     }
 
@@ -229,7 +235,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse star capture with trailing locator" in {
       val f = onlyField("data D { @default(fn[s: MyStruct($chain* : .objs[$idx]).prop]() { s }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       val cap = fn.captures.head
       assert(cap.path == List(
         RawCaptureStep.Star(RawStarCapture("chain", List(
@@ -242,7 +248,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse nested method chains" in {
       val f = onlyField("data D { @default(fn[s: S]() { s.trim().uppercase() }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.Call(
         BodyExpr.Call(BodyExpr.Path("s", Nil), "trim", Nil),
         "uppercase",
@@ -252,7 +258,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse operator precedence in 1 + 2 * 3" in {
       val f = onlyField("data D { @default(fn[self: Self]() { 1 + 2 * 3 }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "+",
         BodyExpr.Lit(BodyLiteral.IntLit(1)),
@@ -266,7 +272,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse unary with parens" in {
       val f = onlyField("data D { @default(fn[self: Self]() { -(1 + 2) }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.UnaryOp(
         "-",
         BodyExpr.BinOp(
@@ -280,13 +286,13 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse @normalize with let and if/else" in {
       val f = onlyField("data D { @normalize(fn[t: T](self) { let v = self.x; if v { 1 } else { 2 } }) x: str }")
       val fn = f.field.normalize.getOrElse(fail("expected normalize fn"))
-      assert(fn.body.letBindings == List(("v", BodyExpr.Path("self", List(BodyExpr.Segment.Field("x"))))))
+      assert(letsOf(fn) == List(("v", BodyExpr.Path("self", List(BodyExpr.Segment.Field("x"))))))
       assert(fn.body.result.isInstanceOf[BodyExpr.If])
     }
 
     "parse fn property with captures" in {
       val p = onlyProperty("data D { area: f32 = fn[p: Parent](self) { self.width } }")
-      val fn = unwrapFn(p.field.default)
+      val fn = p.fn
       assert(fn.captures.size == 1)
       assert(fn.captures.head.name == "p")
       assertSimpleType(fn.captures.head.rootType, "Parent")
@@ -297,7 +303,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse computed fn with external args" in {
       val p = onlyProperty("data D { curve: f32 = fn(self, t: f32) { self.base + t } }")
-      val fn = unwrapFn(p.field.default)
+      val fn = p.fn
       assert(fn.params.size == 2)
       assert(fn.params.map(_.name) == List("self", "t"))
       assertSimpleType(fn.params(1).tpe, "f32")
@@ -317,7 +323,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       // methods are rejected later by FnBodyTyper ("unknown method: ..."),
       // covered by FnBodyTypingTest "reject an unknown method".
       val f = onlyField("data D { @default(fn[s: S]() { s.foo() }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.Call(BodyExpr.Path("s", Nil), "foo", Nil))
     }
 
@@ -331,7 +337,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse || binding looser than &&" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a || b && c }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "||",
         BodyExpr.Path("a", Nil),
@@ -345,7 +351,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse || as left-associative" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a || b || c }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "||",
         BodyExpr.BinOp("||", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
@@ -355,7 +361,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse == and != as left-associative" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a == b != c }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "!=",
         BodyExpr.BinOp("==", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
@@ -365,14 +371,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse comparison operators" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a < b <= c }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "<=",
         BodyExpr.BinOp("<", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
         BodyExpr.Path("c", Nil),
       ))
       val g = onlyField("data D { @default(fn[self: Self]() { x > y >= z }) x: str }")
-      val gfn = unwrapFn(g.field.default)
+      val gfn = unwrapFn(g.field.fn)
       assert(gfn.body.result == BodyExpr.BinOp(
         ">=",
         BodyExpr.BinOp(">", BodyExpr.Path("x", Nil), BodyExpr.Path("y", Nil)),
@@ -382,14 +388,14 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse + and - as left-associative (a-b-c)" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a - b - c }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "-",
         BodyExpr.BinOp("-", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
         BodyExpr.Path("c", Nil),
       ))
       val g = onlyField("data D { @default(fn[self: Self]() { a - b + c }) x: str }")
-      val gfn = unwrapFn(g.field.default)
+      val gfn = unwrapFn(g.field.fn)
       assert(gfn.body.result == BodyExpr.BinOp(
         "+",
         BodyExpr.BinOp("-", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
@@ -399,7 +405,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse *, / and % as left-associative" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a * b / c % d }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "%",
         BodyExpr.BinOp(
@@ -413,7 +419,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse mixed precedence in a + b * c - d" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a + b * c - d }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "-",
         BodyExpr.BinOp(
@@ -427,7 +433,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse nested parens ((a + b) * (c - d))" in {
       val f = onlyField("data D { @default(fn[self: Self]() { ((a + b) * (c - d)) }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.BinOp(
         "*",
         BodyExpr.BinOp("+", BodyExpr.Path("a", Nil), BodyExpr.Path("b", Nil)),
@@ -437,20 +443,20 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse unary !, - and doubled forms through parens" in {
       val f = onlyField("data D { @default(fn[self: Self]() { !flag }) x: str }")
-      assert(unwrapFn(f.field.default).body.result == BodyExpr.UnaryOp("!", BodyExpr.Path("flag", Nil)))
+      assert(unwrapFn(f.field.fn).body.result == BodyExpr.UnaryOp("!", BodyExpr.Path("flag", Nil)))
       val g = onlyField("data D { @default(fn[self: Self]() { -x }) x: str }")
-      assert(unwrapFn(g.field.default).body.result == BodyExpr.UnaryOp("-", BodyExpr.Path("x", Nil)))
+      assert(unwrapFn(g.field.fn).body.result == BodyExpr.UnaryOp("-", BodyExpr.Path("x", Nil)))
       val h = onlyField("data D { @default(fn[self: Self]() { !(!a) }) x: str }")
-      assert(unwrapFn(h.field.default).body.result ==
+      assert(unwrapFn(h.field.fn).body.result ==
         BodyExpr.UnaryOp("!", BodyExpr.UnaryOp("!", BodyExpr.Path("a", Nil))))
       val k = onlyField("data D { @default(fn[self: Self]() { -(-a) }) x: str }")
-      assert(unwrapFn(k.field.default).body.result ==
+      assert(unwrapFn(k.field.fn).body.result ==
         BodyExpr.UnaryOp("-", BodyExpr.UnaryOp("-", BodyExpr.Path("a", Nil))))
     }
 
     "parse nested if/else" in {
       val f = onlyField("data D { @default(fn[self: Self]() { if a { if b { 1 } else { 2 } } else { 3 } }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.If(
         BodyExpr.Path("a", Nil),
         BodyExpr.If(
@@ -465,7 +471,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse every literal kind, escapes and == on strings" in {
       def resultOf(body: String): BodyExpr = {
         val f = onlyField(s"data D { @default(fn[self: Self]() { $body }) x: str }")
-        unwrapFn(f.field.default).body.result
+        unwrapFn(f.field.fn).body.result
       }
       assert(resultOf("42") == BodyExpr.Lit(BodyLiteral.IntLit(42)))
       assert(resultOf("3.14") == BodyExpr.Lit(BodyLiteral.FloatLit(3.14)))
@@ -492,7 +498,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse every method-whitelist entry" in {
       def callOf(body: String): BodyExpr.Call = {
         val f = onlyField(s"data D { @default(fn[s: S]() { $body }) x: str }")
-        unwrapFn(f.field.default).body.result match {
+        unwrapFn(f.field.fn).body.result match {
           case c: BodyExpr.Call => c
           case other => fail(s"expected Call for [$body], got $other")
         }
@@ -519,7 +525,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse dotted field chains" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a.b.c.d }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.result == BodyExpr.Path("a", List(
         BodyExpr.Segment.Field("b"),
         BodyExpr.Segment.Field("c"),
@@ -529,13 +535,13 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse index segments with int, var and expr bodies" in {
       val i = onlyField("data D { @default(fn[self: Self]() { a[0] }) x: str }")
-      assert(unwrapFn(i.field.default).body.result ==
+      assert(unwrapFn(i.field.fn).body.result ==
         BodyExpr.Path("a", List(BodyExpr.Segment.Index(BodyExpr.Lit(BodyLiteral.IntLit(0))))))
       val v = onlyField("data D { @default(fn[self: Self]() { a[idx] }) x: str }")
-      assert(unwrapFn(v.field.default).body.result ==
+      assert(unwrapFn(v.field.fn).body.result ==
         BodyExpr.Path("a", List(BodyExpr.Segment.Index(BodyExpr.Path("idx", Nil)))))
       val e = onlyField("data D { @default(fn[self: Self]() { a[idx + 1] }) x: str }")
-      assert(unwrapFn(e.field.default).body.result == BodyExpr.Path("a", List(
+      assert(unwrapFn(e.field.fn).body.result == BodyExpr.Path("a", List(
         BodyExpr.Segment.Index(BodyExpr.BinOp(
           "+",
           BodyExpr.Path("idx", Nil),
@@ -546,13 +552,13 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse mixed a.b[0].c and method call after index" in {
       val f = onlyField("data D { @default(fn[self: Self]() { a.b[0].c }) x: str }")
-      assert(unwrapFn(f.field.default).body.result == BodyExpr.Path("a", List(
+      assert(unwrapFn(f.field.fn).body.result == BodyExpr.Path("a", List(
         BodyExpr.Segment.Field("b"),
         BodyExpr.Segment.Index(BodyExpr.Lit(BodyLiteral.IntLit(0))),
         BodyExpr.Segment.Field("c"),
       )))
       val g = onlyField("data D { @default(fn[self: Self]() { a[0].trim() }) x: str }")
-      assert(unwrapFn(g.field.default).body.result == BodyExpr.Call(
+      assert(unwrapFn(g.field.fn).body.result == BodyExpr.Call(
         BodyExpr.Path("a", List(BodyExpr.Segment.Index(BodyExpr.Lit(BodyLiteral.IntLit(0))))),
         "trim",
         Nil,
@@ -561,29 +567,29 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse empty, params-only and captures-only fn headers" in {
       val e = onlyField("data D { @default(fn() { 1 }) x: str }")
-      val efn = unwrapFn(e.field.default)
+      val efn = unwrapFn(e.field.fn)
       assert(efn.captures.isEmpty && efn.params.isEmpty)
       assert(efn.body.result == BodyExpr.Lit(BodyLiteral.IntLit(1)))
       val p = onlyField("data D { @default(fn(self) { self.x }) x: str }")
-      val pfn = unwrapFn(p.field.default)
+      val pfn = unwrapFn(p.field.fn)
       assert(pfn.captures.isEmpty && pfn.params.size == 1)
       assert(pfn.params.head.name == "self")
       val c = onlyField("data D { @default(fn[q: Q]() { q }) x: str }")
-      val cfn = unwrapFn(c.field.default)
+      val cfn = unwrapFn(c.field.fn)
       assert(cfn.captures.size == 1 && cfn.params.isEmpty)
       assert(cfn.captures.head.name == "q")
     }
 
     "parse rootType with type args" in {
       val f = onlyField("data D { @default(fn[b: Box[T]]() { b }) x: str }")
-      unwrapFn(f.field.default).captures.head.rootType match {
+      unwrapFn(f.field.fn).captures.head.rootType match {
         case RawTypeRef.Constructor(name, args, _) =>
           assert(name.name == "Box")
           assert(args.toList == List(RawTypeRef.Simple(RawTypeName("T"), Nil)))
         case other => fail(s"expected Constructor Box[T], got $other")
       }
       val g = onlyField("data D { @default(fn[m: Map[K, V]]() { m }) x: str }")
-      unwrapFn(g.field.default).captures.head.rootType match {
+      unwrapFn(g.field.fn).captures.head.rootType match {
         case RawTypeRef.Constructor(name, args, _) =>
           assert(name.name == "Map")
           assert(args.toList.size == 2)
@@ -593,7 +599,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse multi-segment locator with multiple keys" in {
       val f = onlyField("data D { @default(fn[p: Parent.a.b[$k1].c[$k2].d]() { p }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("a")),
         RawCaptureStep.Single(RawLocatorSeg.Field("b")),
@@ -606,7 +612,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse multi-step star captures with chainName variations" in {
       val f = onlyField("data D { @default(fn[s: MyStruct($items* : .groups[$g].members[$m])]() { s }) x: str }")
-      assert(unwrapFn(f.field.default).captures.head.path == List(
+      assert(unwrapFn(f.field.fn).captures.head.path == List(
         RawCaptureStep.Star(RawStarCapture("items", List(
           RawLocatorSeg.Field("groups"),
           RawLocatorSeg.Key("g"),
@@ -615,7 +621,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
         ))),
       ))
       val g = onlyField("data D { @default(fn[s: MyStruct($row* : .objs[$idx])]() { s }) x: str }")
-      assert(unwrapFn(g.field.default).captures.head.path == List(
+      assert(unwrapFn(g.field.fn).captures.head.path == List(
         RawCaptureStep.Star(RawStarCapture("row", List(
           RawLocatorSeg.Field("objs"),
           RawLocatorSeg.Key("idx"),
@@ -650,23 +656,23 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse @normalize coexisting with an = fn property" in {
       val p = onlyProperty("data D { @normalize(fn[t: T](self) { self }) area: f32 = fn(self) { self.width } }")
       assert(p.field.normalize.isDefined)
-      val fn = unwrapFn(p.field.default)
+      val fn = p.fn
       assert(fn.params.size == 1)
       assert(fn.body.result == BodyExpr.Path("self", List(BodyExpr.Segment.Field("width"))))
     }
 
     "parse multiline fn bodies and let shadowing" in {
       val f = onlyField("data D {\n @default(fn[p: Parent]() {\n let a = p.name;\n a.uppercase()\n }) x: str\n }")
-      val fn = unwrapFn(f.field.default)
-      assert(fn.body.letBindings.size == 1)
+      val fn = unwrapFn(f.field.fn)
+      assert(letsOf(fn).size == 1)
       assert(fn.body.result == BodyExpr.Call(
         BodyExpr.Path("a", Nil),
         "uppercase",
         Nil,
       ))
       val s = onlyField("data D { @default(fn[self: Self]() { let x = 1; let x = 2; x }) x: str }")
-      val sfn = unwrapFn(s.field.default)
-      assert(sfn.body.letBindings == List(
+      val sfn = unwrapFn(s.field.fn)
+      assert(letsOf(sfn) == List(
         ("x", BodyExpr.Lit(BodyLiteral.IntLit(1))),
         ("x", BodyExpr.Lit(BodyLiteral.IntLit(2))),
       ))
@@ -703,7 +709,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse every method name verbatim (whitelist enforcement moved to the typer)" in {
       List("foo", "bar", "doFoo", "compute", "frobnicate").foreach { m =>
         val f = onlyField(s"data D { @default(fn[s: S]() { s.$m() }) x: str }")
-        val fn = unwrapFn(f.field.default)
+        val fn = unwrapFn(f.field.fn)
         assert(
           fn.body.result == BodyExpr.Call(BodyExpr.Path("s", Nil), m, Nil),
           s"method name $m not preserved by the parser",
@@ -718,7 +724,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse two stars separated by a field, preserving order" in {
       val f = onlyField("data D { @default(fn[a: T($c1* : .x).b($c2* : .y)]() { a }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Star(RawStarCapture("c1", List(RawLocatorSeg.Field("x")))),
         RawCaptureStep.Single(RawLocatorSeg.Field("b")),
@@ -728,7 +734,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse field-star-field ordering preserved" in {
       val f = onlyField("data D { @default(fn[a: T.f($c* : .x).g]() { a }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("f")),
         RawCaptureStep.Star(RawStarCapture("c", List(RawLocatorSeg.Field("x")))),
@@ -738,7 +744,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse leading field then star then trailing key locator" in {
       val f = onlyField("data D { @default(fn[a: T.root($c* : .items[$i]).tail]() { a }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("root")),
         RawCaptureStep.Star(RawStarCapture("c", List(
@@ -753,7 +759,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       // Canonical opt/set-transparent situating: Child.data inside MyStruct.member —
       // collections are transparent, so traversal is ordinary .field steps.
       val f = onlyField("data D { @default(fn[s: MyStruct.member.data]() { s }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("member")),
         RawCaptureStep.Single(RawLocatorSeg.Field("data")),
@@ -764,7 +770,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       // Allowed but non-canonical: .Some is implied when descending into the opt
       // payload, so it parses as Field("Some") at AST level (never Variant).
       val f = onlyField("data D { @default(fn[s: MyStruct.member.Some.data]() { s }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("member")),
         RawCaptureStep.Single(RawLocatorSeg.Field("Some")),
@@ -775,7 +781,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse instance-style key through collection member" in {
       // Instance-style, not required for schema situating: [$i] keys still parse.
       val f = onlyField("data D { @default(fn[s: MyStruct.member[$i].data]() { s }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("member")),
         RawCaptureStep.Single(RawLocatorSeg.Key("i")),
@@ -786,7 +792,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
     "parse star through collection with trailing field" in {
       // Star expansion through a transparent collection: members iterated, .data situated.
       val f = onlyField("data D { @default(fn[s: MyStruct.members($c* : .data)]() { s }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.captures.head.path == List(
         RawCaptureStep.Single(RawLocatorSeg.Field("members")),
         RawCaptureStep.Star(RawStarCapture("c", List(RawLocatorSeg.Field("data")))),
@@ -795,7 +801,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse assignment to an indexed map target" in {
       val f = onlyField("data D { @default(fn[self: Self]() { self.map[key] = value; value }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts.size == 1)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.Assign(target, value)) =>
@@ -811,7 +817,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse assignment to a plain variable" in {
       val f = onlyField("data D { @default(fn[self: Self]() { let x = 1; x = 2; x }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts.size == 2)
       fn.body.stmts.tail.head match {
         case BodyStmt.Effect(BodyExpr.Assign(target, value)) =>
@@ -824,20 +830,20 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse let with a type annotation" in {
       val f = onlyField("data D { @default(fn[self: Self]() { let x: u32 = 42; x }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts == List(BodyStmt.Let(
         "x",
         Some(RawTypeRef.Simple(RawTypeName("u32"), Nil)),
         BodyExpr.Lit(BodyLiteral.IntLit(42)),
       )))
       // legacy type-erased view still exposes the binding
-      assert(fn.body.letBindings == List(("x", BodyExpr.Lit(BodyLiteral.IntLit(42)))))
+      assert(letsOf(fn) == List(("x", BodyExpr.Lit(BodyLiteral.IntLit(42)))))
       assert(fn.body.result == BodyExpr.Path("x", Nil))
     }
 
     "parse for-in loop over a map" in {
       val f = onlyField("data D { @default(fn[self: Self]() { for (key in self.map) { key } key }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts.size == 1)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.ForIn(varName, iterable, body)) =>
@@ -851,7 +857,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse C-style for loop with += step" in {
       val f = onlyField("data D { @default(fn[self: Self]() { for (i: u32 = 0; i < 10; i += 1) { i } i }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts.size == 1)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.ForC(init, cond, step, body)) =>
@@ -870,7 +876,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse C-style for loop with assign step and untyped init" in {
       val f = onlyField("data D { @default(fn[self: Self]() { for (i = 0; i < 10; i = i + 1) { i } i }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.ForC(init, cond, step, _)) =>
           assert(init.name == "i")
@@ -887,7 +893,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse Rust-style match with variant and wildcard arms" in {
       val f = onlyField("data D { @default(fn[self: Self]() { match (v) { Some(x) => { x } _ => { 0 } } v }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts.size == 1)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.Match(scrutinee, arms)) =>
@@ -904,7 +910,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse match with a bare variant pattern" in {
       val f = onlyField("data D { @default(fn[self: Self]() { match (self.opt) { None => { 0 } _ => { 1 } } self }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.Match(scrutinee, arms)) =>
           assert(scrutinee == BodyExpr.Path("self", List(BodyExpr.Segment.Field("opt"))))
@@ -916,7 +922,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse loop body with statements and no trailing value" in {
       val f = onlyField("data D { @default(fn[self: Self]() { for (k in self.map) { self.map[k] = k; } self }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.ForIn(varName, _, body)) =>
           assert(varName == "k")
@@ -937,7 +943,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse match arm bodies with statements before the value" in {
       val f = onlyField("data D { @default(fn[self: Self]() { match (v) { Some(x) => { let y = x; y } _ => { 0 } } v }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.Match(_, arms)) =>
           assert(arms.head.body == BodyExpr.Block(
@@ -950,9 +956,9 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse mixed lets, assigns, loops and match in one body" in {
       val f = onlyField("data D { @default(fn[self: Self]() { let n: u32 = 0; n = 1; for (k in self.map) { k } match (n) { _ => { n } } n }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts.size == 4)
-      assert(fn.body.letBindings == List(("n", BodyExpr.Lit(BodyLiteral.IntLit(0)))))
+      assert(letsOf(fn) == List(("n", BodyExpr.Lit(BodyLiteral.IntLit(0)))))
       assert(fn.body.stmts.head.isInstanceOf[BodyStmt.Let])
       assert(fn.body.stmts(1).isInstanceOf[BodyStmt.Effect])
       assert(fn.body.result == BodyExpr.Path("n", Nil))
@@ -978,7 +984,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse assert without message" in {
       val f = onlyField("data D { @default(fn[self: Self]() { assert(self.flag); self }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts == List(BodyStmt.Assert(
         BodyExpr.Path("self", List(BodyExpr.Segment.Field("flag"))),
         None,
@@ -987,7 +993,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse assert with message" in {
       val f = onlyField("data D { @default(fn[self: Self]() { assert(self.count > 0, \"must be positive\"); self }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       assert(fn.body.stmts == List(BodyStmt.Assert(
         BodyExpr.BinOp(">", BodyExpr.Path("self", List(BodyExpr.Segment.Field("count"))), BodyExpr.Lit(BodyLiteral.IntLit(0))),
         Some(BodyExpr.Lit(BodyLiteral.StrLit("must be positive"))),
@@ -996,7 +1002,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse assert inside for body" in {
       val f = onlyField("data D { @default(fn[self: Self]() { for (k in self.map) { assert(k != \"\"); } self }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.ForIn(_, _, body)) =>
           assert(body.stmts == List(BodyStmt.Assert(
@@ -1009,7 +1015,7 @@ final class FnSyntaxParserTest extends AnyWordSpec {
 
     "parse assert inside match arm block" in {
       val f = onlyField("data D { @default(fn[self: Self]() { match (v) { Some(x) => { assert(x != \"\"); x } _ => { \"\" } } v }) x: str }")
-      val fn = unwrapFn(f.field.default)
+      val fn = unwrapFn(f.field.fn)
       fn.body.stmts.head match {
         case BodyStmt.Effect(BodyExpr.Match(_, arms)) =>
           assert(arms.head.body.stmts == List(BodyStmt.Assert(

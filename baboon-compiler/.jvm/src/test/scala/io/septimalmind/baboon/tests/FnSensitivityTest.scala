@@ -73,7 +73,7 @@ final class FnSensitivityTest extends AnyWordSpec {
   private def eff(e: BodyExpr): BodyStmt = BodyStmt.Effect(e)
 
   private def rawBody(stmts: List[BodyStmt], result: BodyExpr): RawBody =
-    RawBody(stmts.collect { case BodyStmt.Let(n, _, v) => (n, v) }, result, stmts)
+    RawBody(result, stmts)
 
   private def mustType(
     stmts: List[BodyStmt],
@@ -142,7 +142,6 @@ final class FnSensitivityTest extends AnyWordSpec {
       val (read, write) = mustExtract(body, Some(cap), scope, slot("Basket", "items"))
       assert(read.leafReads == Set(leaf("Basket", "items", "label")))
       assert(read.shapeReads.isEmpty)
-      assert(read.prevReads.isEmpty)
       assert(write.leafReads == Set(leaf("Basket", "items")))
     }
 
@@ -281,7 +280,7 @@ final class FnSensitivityTest extends AnyWordSpec {
       val (read, write) = mustExtract(body, None, childScope(), slot("Child", "count"))
       assert(read.leafReads.isEmpty)
       assert(read.shapeReads.isEmpty)
-      assert(read.prevReads.isEmpty)
+      assert(read.shapeReads.isEmpty)
       assert(write.leafReads == Set(leaf("Child", "count")))
     }
 
@@ -301,7 +300,7 @@ final class FnSensitivityTest extends AnyWordSpec {
     "never report prev reads" in {
       val body = mustType(Nil, path("self", fld("data")), childScope(), str)
       val (read, _) = mustExtract(body, None, childScope(), slot("Child", "data"))
-      assert(read.prevReads.isEmpty)
+      assert(read.shapeReads.isEmpty)
     }
   }
 }
