@@ -905,10 +905,15 @@ object TsDefnTranslator {
 
     // One field-declaration shape: a constructor param with an optional default
     // initializer. (Py has the same concept under the same name for pydantic fields.)
+    // Fn defaults are not yet lowered for this backend: omit the initializer
+    // so leaf-literal pins still emit while fn fields stay constructible.
     private def fieldDecl(f: Field): TextTree[TsValue] = {
-      val paramName   = typeTranslator.escapeTsKeyword(f.name.name)
-      val paramType   = domainTypes.asTsRef(f.tpe, tsFileTools.definitionsBasePkg)
-      val defaultInit = f.default.map(d => q" = ${renderTsDefault(d, f)}").getOrElse(q"")
+      val paramName = typeTranslator.escapeTsKeyword(f.name.name)
+      val paramType = domainTypes.asTsRef(f.tpe, tsFileTools.definitionsBasePkg)
+      val defaultInit = f.default.flatMap {
+        case _: FieldDefault.Fn => None
+        case d                  => Some(q" = ${renderTsDefault(d, f)}")
+      }.getOrElse(q"")
       q"$paramName: $paramType$defaultInit"
     }
 

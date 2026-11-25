@@ -1023,5 +1023,74 @@ final class FnSyntaxParserTest extends AnyWordSpec {
       assert(dto.capture.isEmpty, s"expected no node capture, got ${dto.capture}")
     }
 
+    "remap @default(fn) into field.fn with no default residual" in {
+      // RawField.scala:3 dual home: `@default(fn...)` lives in `field.fn`
+      // (DefFn.fieldDefCore remap), never as `RawDefaultValue.Fn` in `default`.
+      val f = onlyField("data D { @default(fn[p: Parent]() { p.name }) x: str }")
+      assert(f.field.default.isEmpty, s"expected no literal default, got ${f.field.default}")
+      val fn = unwrapFn(f.field.fn)
+      assert(fn.captures.size == 1)
+      assert(fn.captures.head.name == "p")
+      assert(f.field.default.forall(!_.isInstanceOf[RawDefaultValue.Fn]))
+    }
+
+    "keep @default(lit) alongside = fn without an Fn residual" in {
+      // Dual spelling winner: literal stays in `default`, trailing `= fn`
+      // wins the `fn` slot via the FnProperty wrapper; neither slot holds
+      // a `RawDefaultValue.Fn` residual.
+      val dto = parseDto("data D { @default(\"lit\") x: str = fn(self) { self.x } }")
+      assert(dto.members.size == 1, s"expected one member, got ${dto.members}")
+      dto.members.head match {
+        case RawDtoMember.FnProperty(field, _) =>
+          assert(field.default.contains(RawDefaultValue.StrLit("lit")), s"literal default lost: ${field.default}")
+          assert(field.default.forall(!_.isInstanceOf[RawDefaultValue.Fn]))
+          assert(field.fn.isDefined, "expected trailing = fn to win the fn slot")
+          assert(field.fn.get.body.result == BodyExpr.Path("self", List(BodyExpr.Segment.Field("x"))))
+        case other => fail(s"expected FnProperty, got $other")
+      }
+    }
+
+    "accept @capture then #Assertion order on data and contract" in {
+      // DefDto.scala:214,222 / DefContract.scala:13 share DefFn.nodePrefix
+      // (DefFn.scala:122): capture-then-special order is defined once.
+      val dto = parseDto("@capture(s: Shop.basket) #Assertion data Child { count: i32 }")
+      assert(dto.capture.isDefined, "expected node @capture on data")
+      assert(dto.special.isDefined, s"expected #Assertion special, got ${dto.special}")
+      val c = ctx("@capture(s: Shop.basket) #Assertion contract C { count: i32 }")
+      fastparse.parse(c.content, c.defContract.contractEnclosed(_)) match {
+        case fastparse.Parsed.Success(v, idx) =>
+          assert(idx == c.content.length, s"contract left unconsumed: [${c.content.drop(idx)}]")
+          assert(v.capture.isDefined && v.special.isDefined, s"expected capture+special, got $v")
+        case f: fastparse.Parsed.Failure => fail(s"expected contract capture+special success, got: ${f.msg}")
+      }
+    }
+
+    "reject #Assertion then @capture order on data and contract" in {
+      expectParseFailure("#Assertion @capture(s: Shop.basket) data Child { count: i32 }")
+      val c = ctx("#Assertion @capture(s: Shop.basket) contract C { count: i32 }")
+      fastparse.parse(c.content, c.defContract.contractEnclosed(_)) match {
+        case _: fastparse.Parsed.Failure => succeed
+        case fastparse.Parsed.Success(_, idx) if idx != c.content.length => succeed
+        case fastparse.Parsed.Success(v, _) => fail(s"expected contract reversed-prefix failure, got success: $v")
+      }
+    }
+
+    "reject @capture on adt and enum bodies" in {
+      // DefAdt.scala:104-108 / DefEnum.scala:59 carry special-marker only:
+      // RawAdt/RawEnum have no capture slot, so a @capture prefix must fail.
+      val a = ctx("@capture(s: Shop.basket) adt A { D }")
+      fastparse.parse(a.content, a.defAdt.adtEnclosed(_)) match {
+        case _: fastparse.Parsed.Failure => succeed
+        case fastparse.Parsed.Success(_, idx) if idx != a.content.length => succeed
+        case fastparse.Parsed.Success(v, _) => fail(s"expected adt @capture failure, got success: $v")
+      }
+      val e = ctx("@capture(s: Shop.basket) choice E { A }")
+      fastparse.parse(e.content, e.defEnum.enumEnclosed(_)) match {
+        case _: fastparse.Parsed.Failure => succeed
+        case fastparse.Parsed.Success(_, idx) if idx != e.content.length => succeed
+        case fastparse.Parsed.Success(v, _) => fail(s"expected enum @capture failure, got success: $v")
+      }
+    }
+
   }
 }

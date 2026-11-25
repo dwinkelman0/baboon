@@ -1,7 +1,7 @@
 package io.septimalmind.baboon.tests
 
 import io.septimalmind.baboon.parser.model._
-import io.septimalmind.baboon.typer.{FnBodyTyper, FnCaptureResolver, FnSiteExtractor}
+import io.septimalmind.baboon.typer.{FnBodyTyper, FnCaptureResolver, FnReadGate, FnSiteExtractor}
 import io.septimalmind.baboon.typer.model._
 import io.septimalmind.baboon.typer.model.FnTypes.{ctor, scalar}
 import izumi.fundamentals.collections.nonempty.NEList
@@ -261,6 +261,78 @@ final class FnBodyTypingTest extends AnyWordSpec {
           assert(typed.path.isEmpty)
           assert(binds.toMap.get("s").contains(ScopeEntry.CaptureRoot(uref("Child"))))
         case Left(err) => fail(s"expected success: ${err.mkString("; ")}")
+      }
+    }
+
+    "report a star sub-step failure with the same capture+segment text as a single step" in {
+      // FnCaptureResolver.scala:75,82,97,103,188-196: star bodies reuse the
+      // flat single-step home (resolveSeg), so the message shape matches.
+      val singleCap = cap("b", "Basket", single(fldS("nope")))
+      val singleMsg = FnCaptureResolver.resolveCapture(singleCap, schema) match {
+        case Left(errs) => errs.mkString("; ")
+        case Right(_)   => fail("expected single-step failure")
+      }
+      assert(singleMsg.contains("capture b"), s"single msg missing capture name: $singleMsg")
+      assert(singleMsg.contains("`nope`"), s"single msg missing segment: $singleMsg")
+      val star = cap(
+        "b",
+        "Basket",
+        single(fldS("items")),
+        RawCaptureStep.Star(RawStarCapture("c", List(fldS("nope")))),
+      )
+      FnCaptureResolver.resolveCapture(star, schema) match {
+        case Left(errs) =>
+          val msg = errs.mkString("; ")
+          assert(msg.contains("capture b"), s"star msg missing capture name: $msg")
+          assert(msg.contains("`nope`"), s"star msg missing segment: $msg")
+        case Right(_) => fail("expected star sub-step failure")
+      }
+    }
+
+    "reject a [$k] key on a non-collection" in {
+      // Same unknown-style rejection family as unknown fields: key binding
+      // requires lst/set/map (FnCaptureResolver.scala:82-94).
+      val c = cap("d", "Child", single(fldS("data")), single(keyS("k")))
+      FnCaptureResolver.resolveCapture(c, schema) match {
+        case Left(errs) =>
+          val msg = errs.mkString("; ")
+          assert(msg.contains("capture d"), s"missing capture name: $msg")
+          assert(msg.contains("non-collection"), s"expected non-collection rejection, got: $msg")
+        case Right(_) => fail("expected key-on-scalar failure")
+      }
+    }
+  }
+
+  "P2 SchemaPath coherence" should {
+    "reject a mid-path unknown field with its resolve string" in {
+      // SchemaPath.scala:16,61: collections/opt transparent, fields resolved
+      // per step; mid-path mismatch reports the offending segment.
+      SchemaPath.resolve(uid("Child"), List("scores", "nope"), schema) match {
+        case Left(msg) => assert(msg.contains("`nope`"), s"expected segment in message, got: $msg")
+        case Right(p)  => fail(s"expected mid-path failure, got $p")
+      }
+    }
+
+    "gate a hand-built unknown path with the same unknown-field text" in {
+      // SchemaPath coherence via FnReadGate.scala:34: a hand-built leaf path
+      // that never went through resolve is still gated with the identical
+      // unknown-field message (FnOrderingTest:176 covers resolve-side only).
+      val handBuilt = SchemaPath(
+        uid("Child"),
+        List(SchemaStep.FieldStep(FieldName("nope"), uid("Child"), str)),
+      )
+      val body = mustType(Nil, intLit(1), childScope(), i32)
+      val site = FnSite(
+        FnSiteId("Child", "count", FnRole.Default),
+        RawFn(Nil, Nil, rawBody(Nil, intLit(1))),
+      )
+      val sens = Sensitivity(Set(handBuilt), Set.empty)
+      val input = FnReadGate.Input(site, body, sens, Sensitivity.empty, Set.empty)
+      FnReadGate.gate(List(input), schema) match {
+        case Left(errs) =>
+          val msg = errs.mkString("; ")
+          assert(msg.contains("`nope`"), s"expected unknown-field text, got: $msg")
+        case Right(_) => fail("expected gate to reject hand-built unknown path")
       }
     }
   }

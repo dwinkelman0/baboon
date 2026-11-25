@@ -83,6 +83,23 @@ final class FnPipelineTest extends AnyWordSpec {
   private def cap1(name: String, root: String, segs: RawLocatorSeg*): RawCapture =
     RawCapture(name, rt(root), segs.toList.map(RawCaptureStep.Single(_)))
 
+  private def bareSelf: RawTypeRef = rt("Self")
+  private def bareFn(stmts: List[BodyStmt], result: BodyExpr): RawFn =
+    RawFn(Nil, List(RawFnParam("self", bareSelf)), rawBody(stmts, result))
+  private def bareCap(name: String, segs: RawLocatorSeg*): RawCapture =
+    RawCapture(name, bareSelf, segs.toList.map(RawCaptureStep.Single(_)))
+
+  /** Simulates `BaboonTranslator.withFieldStub`: prepends the converting
+    * field ahead of the DTO base fields while leaving `roots` untouched.
+    */
+  private def stubbed(owner: String, stub: Field, base: FnSchema): FnSchema =
+    base.types.get(owner) match {
+      case Some(d: Typedef.Dto) =>
+        val merged = stub +: d.fields.filterNot(_.name == stub.name)
+        base.copy(types = base.types + (owner -> d.copy(fields = merged)))
+      case _ => base
+    }
+
   private def sp(owner: String, segs: String*): SchemaPath =
     SchemaPath.resolve(uid(owner), segs.toList, schema) match {
       case Right(p)  => p
@@ -432,6 +449,92 @@ final class FnPipelineTest extends AnyWordSpec {
       val leaf = chainInN("Bot", "v", fn0("Bot", Nil, path("s", fld("a"), fld("m"), fld("b"), fld("v"))), botNc)
       val p = mustAssemble(List(top, between, leaf))
       assert(p.fns.size == 3)
+    }
+  }
+
+  "P1 bare Self mapping" should {
+
+    "resolve a bare migrate self param to the owner container" in {
+      val p = mustAssemble(
+        List(
+          in("Child", "v", FnRole.Migrate, bareFn(Nil, path("self", fld("count"))), sources = Set(sp("Child", "count"))),
+        ),
+      )
+      val (_, typed, _) = p.fns.head
+      assert(typed.params == List("self" -> uref("Child")))
+    }
+
+    "map a bare capture root to the field type for Default" in {
+      val fn = RawFn(List(bareCap("s")), List(RawFnParam("self", rt("Child"))), rawBody(Nil, intLit(0)))
+      val p = mustAssemble(List(in("Child", "count", FnRole.Default, fn)))
+      val (_, typed, _) = p.fns.head
+      assert(typed.capture.map(_.rootType) == Some(i32))
+    }
+
+    "reject a bare capture root on Computed as a redundant self capture" in {
+      val fn = RawFn(List(bareCap("s")), List(RawFnParam("self", rt("Child"))), rawBody(Nil, path("self", fld("count"))))
+      val errs = mustFail(List(in("Child", "grand", FnRole.Computed, fn)))
+      assert(errs.exists(_.contains("redundant")), errs.mkString("; "))
+    }
+
+    "leave explicit non-Self annotations untouched for every role" in {
+      assert(FnPipeline.selfFor(FnRole.Default, "Child", rt("i32"), rt("i32")) == rt("i32"))
+      assert(FnPipeline.selfFor(FnRole.Computed, "Child", rt("i32"), rt("i32")) == rt("i32"))
+      assert(FnPipeline.selfFor(FnRole.Normalize, "Child", rt("str"), rt("str")) == rt("str"))
+      assert(FnPipeline.selfFor(FnRole.Migrate, "Child", rt("i32"), rt("Child")) == rt("Child"))
+      assert(FnPipeline.selfForType(FnRole.Default, uref("Child"), i32) == i32)
+      assert(FnPipeline.selfForType(FnRole.Computed, uref("Child"), i32) == uref("Child"))
+    }
+  }
+
+  "P1 dual encoding" should {
+
+    "lower legacy @default(fn) and =fn spellings to an identical TypedFn" in {
+      val body = bareFn(Nil, intLit(7))
+      val legacy = RawField(RawFieldName("count"), rt("i32"), None, default = None, fn = Some(body))
+      val modern = RawField(RawFieldName("count"), rt("i32"), None, fn = Some(body))
+      def assembleField(f: RawField): TypedFn =
+        mustAssemble(List(FnSiteInputs(f.fn.get, "Child", "count", FnRole.Default, f.tpe, Set.empty, schema))).fns.head._2
+      assert(assembleField(legacy) == assembleField(modern))
+    }
+  }
+
+  "P2 stub roots" should {
+
+    "preserve gcRoot roots through a withFieldStub-shaped schema" in {
+      assert(FnSchema.empty.roots.isEmpty)
+      val direct = inRoot("Item", "qty", FnRole.Computed, fnCap(cap1("s", "Shop"), "Item", Nil, path("s", fld("basket"), fld("a"))))
+      val directErrs = mustFail(List(direct))
+      assert(directErrs.exists(_.contains("may be instantiated without a parent")), directErrs.mkString("; "))
+      val stub = Field(FieldName("qty"), i32, None)
+      val stubbedSchema = stubbed("Item", stub, direct.schema)
+      assert(stubbedSchema.roots == direct.schema.roots)
+      assert(stubbedSchema.roots.contains("Item"))
+      val viaStub = direct.copy(schema = stubbedSchema)
+      val stubErrs = mustFail(List(viaStub))
+      assert(stubErrs.exists(_.contains("may be instantiated without a parent")), stubErrs.mkString("; "))
+    }
+  }
+
+  "P7 batch invariants" should {
+
+    "reject a duplicate (owner, field, role) site" in {
+      val a = in("Child", "count", FnRole.Default, fn0("Child", Nil, intLit(0)))
+      val b = in("Child", "count", FnRole.Default, fn0("Child", Nil, intLit(1)))
+      val errs = mustFail(List(a, b))
+      assert(errs.exists(_.contains("duplicate")), errs.mkString("; "))
+    }
+
+    "order cross-owner default before computed deterministically under shuffle" in {
+      val d1 = in("Child", "count", FnRole.Default, fn0("Child", Nil, intLit(0)))
+      val d2 = in("Basket", "a", FnRole.Default, fn0("Basket", Nil, intLit(0)))
+      val c = in("Item", "qty", FnRole.Computed, fn0("Item", Nil, path("self", fld("price"))))
+      val fwd = renders(mustAssemble(List(d1, d2, c)))
+      val rev = renders(mustAssemble(List(c, d2, d1)))
+      assert(fwd == rev)
+      val idx = (s: String) => fwd.indexWhere(_.contains(s))
+      assert(idx("Item.qty(computed)") > idx("Basket.a(default)"))
+      assert(idx("Item.qty(computed)") > idx("Child.count(default)"))
     }
   }
 }
