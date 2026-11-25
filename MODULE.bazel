@@ -1,8 +1,12 @@
-module(name = "baboon", version = "0.0.0")
+module(
+    name = "baboon",
+    version = "0.0.0",
+)
 
 # --- bzlmod deps ---
 bazel_dep(name = "rules_scala", version = "7.4.1")
 bazel_dep(name = "rules_python", version = "0.40.0")
+bazel_dep(name = "rules_uv", version = "0.89.2")
 bazel_dep(name = "rules_rust", version = "0.69.0")
 bazel_dep(name = "rules_cc", version = "0.2.4")
 bazel_dep(name = "rules_java", version = "7.6.1")
@@ -10,11 +14,13 @@ bazel_dep(name = "rules_jvm_external", version = "6.8")
 bazel_dep(name = "protobuf", version = "36.2")
 bazel_dep(name = "rules_dotnet", version = "0.22.2")
 bazel_dep(name = "aspect_rules_js", version = "2.8.3")
+
 # aspect_rules_js 2.8.3 floor-pins aspect_bazel_lib 2.17.1, whose toolchain
 # rules pass `incompatible_use_toolchain_transition` (removed in Bazel 9).
 # Pin a newer release whose lib/private/*_toolchain.bzl no longer uses that
 # kwarg (verified: 9 hits in 2.17.1, 0 in 2.19.4 tarballs); MVS keeps this.
 bazel_dep(name = "aspect_bazel_lib", version = "2.19.4")
+
 # rules_nodejs 6.3.0's nodejs_toolchains_repo.bzl passes
 # `incompatible_use_toolchain_transition` (removed in Bazel 9), and its
 # nodejs/toolchain.bzl uses the implicit CcInfo global (removed in Bazel 9).
@@ -24,6 +30,7 @@ bazel_dep(name = "aspect_bazel_lib", version = "2.19.4")
 bazel_dep(name = "rules_nodejs", version = "6.7.3")
 bazel_dep(name = "rules_kotlin", version = "2.3.20")
 bazel_dep(name = "rules_dart", version = "0.10.0")
+
 # NB: resolved to 3.1.2 by MVS (a transitive dep requires it over 2.5.0);
 # pin the resolved version so --check_direct_dependencies stays quiet.
 bazel_dep(name = "rules_swift", version = "3.1.2")
@@ -43,7 +50,10 @@ scala_deps.scalatest()
 
 # --- Python 3.12 + pip ---
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
-python.toolchain(python_version = "3.12", is_default = True)
+python.toolchain(
+    is_default = True,
+    python_version = "3.12",
+)
 use_repo(python, "python_3_12")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
@@ -58,19 +68,20 @@ use_repo(pip, "py_stub_deps")
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
-    # 1.75 is the crates' MSRV floor; 1.90 builds current transitive deps
-    # (e.g. getrandom 0.4.x needs edition 2024) and links working binaries
-    # with the Xcode 27 linker (1.85 emitted dylibs the loader rejects).
-    versions = ["1.90.0"],
+    extra_exec_rustc_flags = ["--codegen=strip=none"],
     # rustc's `-C strip=debuginfo` (rules_rust's opt/exec-config default)
     # produces corrupt Mach-O (mis-aligned LINKEDIT) with this Xcode;
     # disable it — later codegen flags override earlier ones in rustc.
     # Needed for both target and exec configs: proc-macros and build
     # scripts always compile in the opt-exec configuration.
     extra_rustc_flags = ["--codegen=strip=none"],
-    extra_exec_rustc_flags = ["--codegen=strip=none"],
+    # 1.75 is the crates' MSRV floor; 1.90 builds current transitive deps
+    # (e.g. getrandom 0.4.x needs edition 2024) and links working binaries
+    # with the Xcode 27 linker (1.85 emitted dylibs the loader rejects).
+    versions = ["1.90.0"],
 )
 use_repo(rust, "rust_toolchains")
+
 register_toolchains("@rust_toolchains//:all")
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
@@ -79,7 +90,11 @@ crate.from_cargo(
     # Single hub covering every Cargo crate with sources. The manifests
     # share the serde/chrono/uuid/rust_decimal/hex/rand core; only
     # test/services/rs adds tiny_http + ureq (unioned here, no second hub).
-    # Kept lockfile-free like the Cargo lanes (no Cargo.lock in repo).
+    # Pinned to //:Cargo.lock (covers all four manifests below) so the
+    # crate graph resolves hermetically; refresh with
+    # `cargo generate-lockfile` via the workspace documented in Cargo.lock
+    # header, or `CARGO_BAZEL_REPIN=1 bazel sync --only=rs_stub_deps`.
+    cargo_lockfile = "//:Cargo.lock",
     manifests = [
         "//test/rs-stub:Cargo.toml",
         "//test/conv-test-rs:Cargo.toml",
@@ -162,12 +177,13 @@ maven.install(
         "org.typelevel:kind-projector_2.13.18:0.13.4",
     ],
     fetch_sources = False,
+    # Pinned via //:maven_install.json (refresh: `REPIN=1 bazel run @maven//:pin`).
+    lock_file = "//:maven_install.json",
     repositories = [
         "https://repo1.maven.org/maven2",
-        "https://central.sonatype.com/repository/maven-snapshots/",
     ],
 )
-use_repo(maven, "maven")
+use_repo(maven, "maven", "unpinned_maven")
 
 # jline 4.4.5 fetched directly: rules_jvm_external's coursier invocation tries to
 # fetch a non-existent jline-4.4.5-jdk8.jar for any jline coordinate, so keep
@@ -202,6 +218,7 @@ http_jar(
 dotnet = use_extension("@rules_dotnet//dotnet:extensions.bzl", "dotnet")
 dotnet.toolchain(dotnet_version = "9.0.100")
 use_repo(dotnet, "dotnet_toolchains")
+
 register_toolchains("@dotnet_toolchains//:all")
 
 # --- NuGet deps for cs-stub (test/cs-stub/BUILD.bazel wraps these via import_library) ---
@@ -212,24 +229,24 @@ register_toolchains("@dotnet_toolchains//:all")
 nuget_archive = use_repo_rule("@rules_dotnet//dotnet:defs.bzl", "nuget_archive")
 
 nuget_archive(
-    id = "Newtonsoft.Json",
     name = "nuget.newtonsoft.json",
+    id = "Newtonsoft.Json",
     sha512 = "sha512-mbJSvHfRxfX3tR/U6n1WU+mWHXswYc+SB/hkOpx8yZZe68hNZGfymJu0cjsaJEkVzCMqePiU6LdIyogqfIn7kg==",
     sources = ["https://api.nuget.org/v3/index.json"],
     version = "13.0.3",
 )
 
 nuget_archive(
-    id = "System.Collections.Immutable",
     name = "nuget.system.collections.immutable",
+    id = "System.Collections.Immutable",
     sha512 = "sha512-z/Oo7nxWmZ0Y578vj8EUVrFJZ3DX6OMuUGlgeYgeeUZOFGT89XfaM8fDFMvJy6+mOIqW6ux5NdNzEnlTnQGJ7A==",
     sources = ["https://api.nuget.org/v3/index.json"],
     version = "9.0.0",
 )
 
 nuget_archive(
-    id = "NUnit",
     name = "nuget.nunit",
+    id = "NUnit",
     sha512 = "sha512-foKGnF2ckq6uRAybnw1PIMDsDxdp1rbuEBJ4t2LYa5HDL80mOcEUjdbVqRDMTsKNiikfkPEBoeyGV42ZXiLLQA==",
     sources = ["https://api.nuget.org/v3/index.json"],
     version = "3.13.2",

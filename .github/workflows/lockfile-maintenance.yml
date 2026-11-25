@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Refresh lockfiles (Bazel/Bzlmod)
+      - name: Refresh lockfiles (Bazel/Bzlmod + Maven + Cargo + pip)
         run: |
           set -euo pipefail
           # NOTE: `mdl :flake-refresh` was removed with mdl (b1b004f).
@@ -29,19 +29,43 @@ jobs:
           # refreshed by this job.
           nix develop --command bazel mod tidy
 
+          # Maven: repin the coursier lockfile (v2 format, checksums included).
+          REPIN=1 nix develop --command bazel run @unpinned_maven//:pin
+
+          # Rust: regenerate the union Cargo.lock covering the four manifests
+          # in crate.from_cargo (test/rs-stub, test/conv-test-rs,
+          # test/rs-conversion-regression, test/services/rs). The manifests
+          # are standalone crates, so resolve them via a scratch workspace
+          # (empty lib.rs stubs satisfy cargo's target check; sources are
+          # never compiled here) and copy the resulting lockfile back.
+          rm -rf /tmp/rs-lock-ws && mkdir -p /tmp/rs-lock-ws/svc-rs
+          cp -r test/rs-stub test/conv-test-rs test/rs-conversion-regression /tmp/rs-lock-ws/
+          cp test/services/rs/Cargo.toml /tmp/rs-lock-ws/svc-rs/
+          printf '[workspace]\nmembers = ["rs-stub", "conv-test-rs", "rs-conversion-regression", "svc-rs"]\nresolver = "2"\n' > /tmp/rs-lock-ws/Cargo.toml
+          for d in rs-stub conv-test-rs rs-conversion-regression svc-rs; do
+            mkdir -p "/tmp/rs-lock-ws/$d/src" && touch "/tmp/rs-lock-ws/$d/src/lib.rs"
+          done
+          cargo generate-lockfile --manifest-path /tmp/rs-lock-ws/Cargo.toml
+          cp /tmp/rs-lock-ws/Cargo.lock ./Cargo.lock
+
+          # pip: refresh uv-managed locks via rules_uv (requirements.in -> requirements.txt).
+          nix develop --command bazel run //test/py-stub:generate_requirements_txt
+          nix develop --command bazel run //test/conv-test-py:generate_requirements_txt
+          nix develop --command bazel run //test/services/py:generate_requirements_txt
+
       - name: Commit lockfile update
         id: commit_lockfile
         run: |
           set -euo pipefail
-          if git diff --quiet -- MODULE.bazel.lock; then
+          if git diff --quiet -- MODULE.bazel.lock maven_install.json Cargo.lock test/py-stub/requirements.txt test/conv-test-py/requirements.txt test/services/py/requirements.txt; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git config user.name "Baboon Lockfile Bot"
           git config user.email "lockfile-bot@users.noreply.github.com"
-          git add MODULE.bazel.lock
-          git commit -m "chore: refresh MODULE.bazel.lock"
+          git add MODULE.bazel.lock maven_install.json Cargo.lock test/py-stub/requirements.txt test/conv-test-py/requirements.txt test/services/py/requirements.txt
+          git commit -m "chore: refresh lockfiles (bazel/maven/cargo/pip)"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Push changes

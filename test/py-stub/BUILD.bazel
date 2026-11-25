@@ -1,4 +1,5 @@
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_uv//uv:pip.bzl", "pip_compile")
 load("//tools/bazel:baboon.bzl", "baboon_codegen")
 load(":py_generated_main.bzl", "PY_GENERATED_MAIN")
 load(":py_generated_review.bzl", "PY_GENERATED_REVIEW")
@@ -123,4 +124,12 @@ py_test(
         ":py_gen_review",
         ":py_stub",
     ],
+)
+
+# uv-managed pip lock: `bazel run //test/py-stub:generate_requirements_txt`
+# regenerates requirements.txt from requirements.in (with hashes).
+pip_compile(
+    name = "generate_requirements_txt",
+    requirements_in = "requirements.in",
+    requirements_txt = "requirements.txt",
 )

@@ -4,6 +4,9 @@ __pycache__
 .direnv
 /bazel-*
 Cargo.lock
+# ...except the hermetic union lock for crate.from_cargo (MODULE.bazel
+# `cargo_lockfile = "//:Cargo.lock"`); refreshed by lockfile-maintenance.yml.
+!/Cargo.lock
 baboon.json
 .idea
 .claude/

@@ -1,0 +1,11 @@
+load("@rules_uv//uv:pip.bzl", "pip_compile")
+
+package(default_visibility = ["//visibility:public"])
+
+# uv-managed pip lock: `bazel run //test/services/py:generate_requirements_txt`
+# regenerates requirements.txt from requirements.in (with hashes).
+pip_compile(
+    name = "generate_requirements_txt",
+    requirements_in = "requirements.in",
+    requirements_txt = "requirements.txt",
+)
