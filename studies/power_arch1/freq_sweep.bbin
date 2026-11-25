@@ -1,0 +1,22 @@
+// Parse-only freq-sweep study for power.arch1 @2.0.0: sweep f (and paired
+// V from the V-f table) at fixed cores/activity; expect Pdyn ~ V^2 f and a
+// mem->comp crossover in Teff. Not executed: the import is resolved and the
+// per-point partial SoCs are sealed by backends.
+using power.arch1 @"2.0.0"
+import (base as g: ~SoC) from rel:'golden.bbin'
+
+let leakPts: {LeakPoint} = CsvLoader(LeakPoint, rel:'leak.csv').map("voltage", .voltage).map("pleak", .pleak)
+let memPts: {MemPoint} = JsonLoader(MemPoint, rel:'mem.json').map("intensity", .intensity).map("meff", .meff)
+let sweep: {VfPoint} = {VfPoint { voltage = 0.7, fmax = 1.6e9 }, VfPoint { voltage = 0.8, fmax = 2.2e9 }, VfPoint { voltage = 0.9, fmax = 2.8e9 }, VfPoint { voltage = 1.0, fmax = 3.4e9 }}
+
+with provenance({model = "power.arch1", modelVersion = "2.0.0", dataVersion = "vf-v1+leak-v1+meff-v1", tool = "baboon"}) {
+  g.workload.activity = 0.5
+  g.bytesPerTask = 2.4e9
+}
+
+for ((idx, row) in sweep) {
+  let point: ~SoC = g
+  // TODO(lower): derive point.op from row (voltage/fmax->freq), seal to SoC,
+  // and call ptotal/teff/perfW per sweep point; sealed-fn calls are not yet expressible.
+  let sealed: SoC = point.seal()
+}

@@ -1,28 +1,14 @@
-"""Shared harness for power_arch1 studies: tolerance checks + provenance."""
+"""Shared printing helpers for power_arch1 studies.
 
-import hashlib
+Inputs+execution now live in the corresponding .bbin files (golden.bbin,
+golden_derate.bbin, freq_sweep.bbin, cores_plus1.bbin, derate.bbin); this
+module only loads stored results and prints check tables.
+"""
+
 import json
 import os
 
-import power_model as pm
-
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-# Versioned model snapshot: the schema resolves via the models/latest symlink.
-# There is no live fallback — models/vX.Y.Z/soc.baboon is the single source.
-MODELS_DIR = os.path.join(HERE, "models")
-LATEST_LINK = os.path.join(MODELS_DIR, "latest")
-SCHEMA_SNAPSHOT = os.path.join(LATEST_LINK, "soc.baboon")
-
-
-def schema_path():
-    """Versioned snapshot only; fail loudly if latest is missing."""
-    if not os.path.exists(SCHEMA_SNAPSHOT):
-        raise FileNotFoundError(
-            f"versioned schema snapshot missing: {SCHEMA_SNAPSHOT} "
-            "(models/latest symlink)"
-        )
-    return SCHEMA_SNAPSHOT
 
 REL_TOL_POWER = 1e-9   # power/energy: exact table lerp
 REL_TOL_PERFW = 1e-6   # perf/W division chain
@@ -32,6 +18,16 @@ def rel_err(got, exp):
     if exp == 0.0:
         return 0.0 if got == 0.0 else float("inf")
     return abs(got - exp) / abs(exp)
+
+
+def load_results(study):
+    """Load the stored results + provenance for a study (written by the
+    .bbin lowering; this script never computes)."""
+    with open(os.path.join(HERE, f"results_{study}.json")) as f:
+        results = json.load(f)
+    with open(os.path.join(HERE, f"provenance_{study}.json")) as f:
+        provenance = json.load(f)
+    return results, provenance
 
 
 def check_row(name, got, expected, tols):
@@ -49,24 +45,6 @@ def check_row(name, got, expected, tols):
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}.{k}: got={got[k]!r} exp={exp!r} relerr={err:.2e} tol={tol:.0e}")
         rows.append((k, ok))
     return rows
-
-
-def emit(study, inputs_desc, results, extra=None):
-    blob = json.dumps(results, indent=2, sort_keys=True)
-    with open(os.path.join(HERE, f"results_{study}.json"), "w") as f:
-        f.write(blob + "\n")
-    prov = {
-        "study": study,
-        "inputs": inputs_desc,
-        "model_version": pm.MODEL_VERSION,
-        "data_versions": pm.DATA_VERSIONS,
-        "results_hash": hashlib.sha256(blob.encode()).hexdigest(),
-    }
-    if extra:
-        prov.update(extra)
-    with open(os.path.join(HERE, f"provenance_{study}.json"), "w") as f:
-        f.write(json.dumps(prov, indent=2, sort_keys=True) + "\n")
-    return prov
 
 
 def summarize(all_rows):

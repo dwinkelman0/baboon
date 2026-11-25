@@ -344,7 +344,8 @@ object BbinIr {
     * and cross/join ops become [[IRJoin]] alongside. */
   private def sealNodes(name: String, tpe: String, expr: BbinExpr): List[IRStmt] = expr match {
     case leaf: BbinExpr.Leaf =>
-      List(IRLeaf(rootOf(leaf.base), leaf.overrides.map(_.name)))
+      val root = rootOf(leaf.base)
+      List(IRLeaf(if (root == "<expr>") name else root, leaf.overrides.map(_.name)))
     case chain: BbinExpr.Chain =>
       joinsInChain(chain) ++
         (if (chain.ops.contains(BbinChainOp.Seal)) List(IRSeal(name, tpe)) else Nil) ++

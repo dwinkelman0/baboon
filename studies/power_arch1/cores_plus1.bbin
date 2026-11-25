@@ -1,0 +1,20 @@
+// Parse-only cores+1 study for power.arch1 @2.0.0: N vs N+1 cores at fixed
+// V-f. Expect sublinear speedup when memory-bound and Pdyn scaling with
+// Ceff ~ cores. Not executed: the import is resolved and the per-point
+// partial SoCs are sealed by backends.
+using power.arch1 @"2.0.0"
+import (base as g: ~SoC) from rel:'golden.bbin'
+
+let arches: {Arch} = {Arch { cores = 4.0, cacheMB = 8.0, memCfg = "ddr5-1ch" }, Arch { cores = 5.0, cacheMB = 8.0, memCfg = "ddr5-1ch" }}
+
+with provenance({model = "power.arch1", modelVersion = "2.0.0", dataVersion = "vf-v1+leak-v1+meff-v1", tool = "baboon"}) {
+  g.op.voltage = 0.9
+  g.op.freq = 2.8e9
+}
+
+for ((idx, row) in arches) {
+  let point: ~SoC = g
+  // TODO(lower): set point.arch from row, seal to SoC, and call
+  // tcomp/teff/pdyn/pleak per core count; sealed-fn calls are not yet expressible.
+  let sealed: SoC = point.seal()
+}

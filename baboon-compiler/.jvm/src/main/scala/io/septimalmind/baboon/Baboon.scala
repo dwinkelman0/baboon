@@ -5,9 +5,14 @@ import distage.*
 import io.septimalmind.baboon.explore.{ExploreContext, ExploreInputs, ExploreShell}
 import io.septimalmind.baboon.lsp._
 import io.septimalmind.baboon.parser.model.FSPath
+import io.septimalmind.baboon.parser.ParserContext
 import io.septimalmind.baboon.parser.model.issues.IssuePrinter.IssuePrinterListOps
 import io.septimalmind.baboon.BaboonModeAxis
 import io.septimalmind.baboon.bincompat.{BincompatClassifier, BincompatRenderer, BincompatResolver}
+import io.septimalmind.baboon.bbin.model._
+import io.septimalmind.baboon.bbin.parser.{BbinImportResolver, DefBbin}
+import io.septimalmind.baboon.bbin.translator.python.BbinPythonLower
+import io.septimalmind.baboon.bbin.typer.BbinIr
 import io.septimalmind.baboon.diff.{BaboonDiffRenderer, VersionRef}
 import io.septimalmind.baboon.git.{GitInvokerImpl, GitModelMaterializer, GitModelMaterializerErrors, TempWorktreeFactory}
 import io.septimalmind.baboon.scheme.{BaboonSchemeRenderer, SchemeArchive, SchemeSelection, SchemeSelector, SchemeZipWriter}
@@ -143,6 +148,7 @@ object Baboon {
        |  :scheme                  Emit a cleaned-up .baboon file for a domain version, or a ZIP of many
        |  :diff                    Report the schema diff between two versions of a domain
        |  :bincompat               Check binary compatibility between two versions of a domain
+       |  :inputs                  Parse a .bbin input file and emit an executable Python module
        |
        |Common transpiler options (apply to all language modalities):
        |  --output <dir>           Output directory for generated code (required)
@@ -205,6 +211,10 @@ object Baboon {
        |  the given git commit/tag/ref (HEAD, HEAD~1, a tag, a SHA) via the 'git' binary; it fails fast
        |  if 'git' is unavailable or the ref/path cannot be resolved. A side without '@' uses the working tree.
        |
+       |Inputs options (:inputs):
+       |  --inputs <file>          Source .bbin file to lower (imports resolve against its directory)
+       |  --out <dir>              Output directory for the emitted <basename>.py module
+       |
        |LSP options (:lsp):
        |  --port <port>            TCP port to listen on (default: stdio)
        |
@@ -219,6 +229,7 @@ object Baboon {
        |  baboon --model-dir ./models :diff --domain=my.pkg --from=1.0.0 --to=2.0.0 --format=json
        |  baboon --model-dir ./models :diff --domain=my.pkg --from=2.0.0@HEAD~1 --to=2.0.0
        |  baboon --model-dir ./models :bincompat --domain=my.pkg --from=3.0.0@HEAD~3 --to=3.0.0
+       |  baboon :inputs --inputs ./study.bbin --out ./out
        |""".stripMargin
   }
 
@@ -295,6 +306,7 @@ object Baboon {
         val isSchemeMode   = modalities.exists { case ModalityArgs(id, _) => id == "scheme" }
         val isDiffMode     = modalities.exists { case ModalityArgs(id, _) => id == "diff" }
         val isBincompatMode = modalities.exists { case ModalityArgs(id, _) => id == "bincompat" }
+        val isInputsMode    = modalities.exists { case ModalityArgs(id, _) => id == "inputs" }
         val _              = isLspMode || modalities.exists { case ModalityArgs(id, _) => id == "lsp" }
 
         if (isLspMode) {
@@ -409,6 +421,23 @@ object Baboon {
             import izumi.functional.bio.unsafe.UnsafeInstances.Lawless_ParallelErrorAccumulatingOpsEither
 
             bincompatEntrypoint(directoryInputs, individualInputs, bincompatOptions._1)
+          }
+          out match {
+            case Left(value) =>
+              System.err.println(value.toList.niceList())
+              System.exit(1)
+              ()
+            case Right(_) =>
+              System.exit(0)
+              ()
+          }
+        } else if (isInputsMode) {
+          val inputsModality = modalities.find(_.id == "inputs").get
+          val out = for {
+            generalOptions <- CaseApp.parse[CLIOptions](generalArgs).leftMap(e => NEList(s"Can't parse generic CLI: $e"))
+            inputs         <- parseInputsArgs(inputsModality.args.toList)
+          } yield {
+            inputsEntrypoint(inputs._1, inputs._2)
           }
           out match {
             case Left(value) =>
@@ -773,6 +802,70 @@ object Baboon {
       }
       sys.exit(2)
     }
+  }
+
+  /** Parses `:inputs --inputs <file> --out <dir>` (both required). */
+  private[baboon] def parseInputsArgs(args: List[String]): Either[NEList[String], (String, String)] = {
+    def flag(name: String): Option[String] =
+      args.sliding(2).collectFirst { case Seq(k, v) if k == name => v }
+    (flag("--inputs"), flag("--out")) match {
+      case (Some(inputs), Some(out)) => Right((inputs, out))
+      case _ =>
+        Left(NEList.unsafeFrom(List(":inputs requires --inputs <file> --out <dir>")))
+    }
+  }
+
+  /** `:inputs --inputs <file> --out <dir>`: parse one `.bbin`, resolve imports
+    * against the file's directory, assemble IR best-effort (typer errors become
+    * stderr warnings, not hard failures), lower the executable subset and write
+    * `<basename>.py` into `--out`. Lowering gaps fail in the emitted module with
+    * a `NotImplementedError` naming the op. */
+  private def inputsEntrypoint(inputsFile: String, outDir: String): Unit = {
+    import java.nio.file.{Files, Paths}
+
+    val inPath = Paths.get(inputsFile)
+    if (!Files.isRegularFile(inPath)) {
+      System.err.println(s":inputs input file does not exist: $inputsFile")
+      sys.exit(2)
+    }
+    val content = new String(Files.readAllBytes(inPath), "UTF-8")
+    val fsPath  = FSPath.parse(NEString.unsafeFrom(inPath.toString))
+    val defn    = new DefBbin(ParserContext(fsPath, content))
+    val raw: RawBbin = fastparse.parse(content, defn.bbinFile(_)) match {
+      case fastparse.Parsed.Success((usings, imports, stmts), idx) if idx == content.length =>
+        RawBbin(fsPath, usings, imports, stmts)
+      case fastparse.Parsed.Success(_, idx) =>
+        System.err.println(s":inputs parse of $inputsFile left unconsumed input at offset $idx")
+        sys.exit(1)
+      case f: fastparse.Parsed.Failure =>
+        System.err.println(s":inputs parse failed for $inputsFile: ${f.msg}")
+        sys.exit(1)
+    }
+    val readFile: String => Option[String] = {
+      p =>
+        try Some(new String(Files.readAllBytes(Paths.get(p)), "UTF-8"))
+        catch { case _: Throwable => None }
+    }
+    val (resolved, importErrors)     = BbinImportResolver.resolve(inPath.toString, raw, readFile)
+    val (programOpt, assembleErrors) = BbinIr.assemble(raw, resolved, Set.empty, Map.empty, Set.empty, Map.empty)
+    (importErrors ++ assembleErrors).foreach(e => System.err.println(s":inputs warning: $e"))
+    val program = programOpt match {
+      case Some(p) => p
+      case None =>
+        System.err.println(s":inputs cannot assemble IR for $inputsFile (scope failed, see warnings above)")
+        sys.exit(1)
+    }
+    val topLets: List[(String, BbinExpr)] = raw.statements.collect {
+      case BbinStmt.LetStmt(l) => l.name -> l.expr
+    }
+    val parentDir = Option(inPath.toAbsolutePath.getParent).map(_.toString).getOrElse("")
+    val source    = BbinPythonLower.lowerOrdered(program, topLets, parentDir)
+    Files.createDirectories(Paths.get(outDir))
+    val fileName = inPath.getFileName.toString
+    val base     = if (fileName.endsWith(".bbin")) fileName.stripSuffix(".bbin") else fileName
+    val target   = Paths.get(outDir, base + ".py")
+    Files.write(target, source.getBytes("UTF-8"))
+    System.err.println(s":inputs wrote ${target.toString}")
   }
 
   case class SharedOpts(outOpts: OutputOptions, genericOpts: GenericOptions)

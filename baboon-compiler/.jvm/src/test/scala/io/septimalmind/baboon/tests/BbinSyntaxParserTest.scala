@@ -780,5 +780,88 @@ final class BbinSyntaxParserTest extends AnyWordSpec {
       )
     }
 
+    "parse freq_sweep.bbin" in {
+      val bbin = parseExampleFile("freq_sweep.bbin")
+      assert(bbin.usings == List(BbinUsing("power.arch1", "2.0.0")))
+      val socRef = RawTypeRef.Simple(RawTypeName("SoC"), Nil)
+      assert(bbin.imports == List(BbinImport(List(BbinImportItem("base", Some("g"), Some(BbinType.Partial(socRef)))), "golden.bbin")))
+      val lets = bbin.statements.collect { case BbinStmt.LetStmt(l) => l.name }
+      assert(lets.contains("sweep"), s"expected a sweep set let, got $lets")
+      assert(
+        bbin.statements.exists {
+          case BbinStmt.LetStmt(l) => l.expr.toString.contains("Loader")
+          case _                   => false
+        },
+        "expected a Csv/JsonLoader table line",
+      )
+      assert(bbin.statements.exists(_.isInstanceOf[BbinStmt.WithStmt]), "expected a with provenance block")
+      assert(
+        bbin.statements.exists {
+          case BbinStmt.ForStmt(f) =>
+            f.set == BbinExpr.Ident("sweep") &&
+              f.body.exists {
+                case BbinStmt.LetStmt(l) if l.name == "sealed" =>
+                  l.expr == BbinExpr.Chain(BbinExpr.Ident("point"), List(BbinChainOp.Seal))
+                case _ => false
+              }
+          case _ => false
+        },
+        "expected `for ((idx, row) in sweep)` sealing `point.seal()`",
+      )
+    }
+
+    "parse cores_plus1.bbin" in {
+      val bbin = parseExampleFile("cores_plus1.bbin")
+      assert(bbin.usings == List(BbinUsing("power.arch1", "2.0.0")))
+      val socRef = RawTypeRef.Simple(RawTypeName("SoC"), Nil)
+      assert(bbin.imports == List(BbinImport(List(BbinImportItem("base", Some("g"), Some(BbinType.Partial(socRef)))), "golden.bbin")))
+      val lets = bbin.statements.collect { case BbinStmt.LetStmt(l) => l.name }
+      assert(lets.contains("arches"), s"expected an arches set let, got $lets")
+      val withs = bbin.statements.collect { case BbinStmt.WithStmt(w) => w }
+      assert(withs.size == 1, s"expected one with block, got ${bbin.statements}")
+      val targets = withs.head.body.collect { case BbinStmt.AssignStmt(a) => a.target }
+      assert(targets.exists(_.segments == List(BbinPathSeg.Field("g"), BbinPathSeg.Field("op"), BbinPathSeg.Field("voltage"))))
+      assert(targets.exists(_.segments == List(BbinPathSeg.Field("g"), BbinPathSeg.Field("op"), BbinPathSeg.Field("freq"))))
+      assert(
+        bbin.statements.exists {
+          case BbinStmt.ForStmt(f) =>
+            f.set == BbinExpr.Ident("arches") &&
+              f.body.exists {
+                case BbinStmt.LetStmt(l) if l.name == "sealed" =>
+                  l.expr == BbinExpr.Chain(BbinExpr.Ident("point"), List(BbinChainOp.Seal))
+                case _ => false
+              }
+          case _ => false
+        },
+        "expected `for ((idx, row) in arches)` sealing `point.seal()`",
+      )
+    }
+
+    "parse derate.bbin" in {
+      val bbin = parseExampleFile("derate.bbin")
+      assert(bbin.usings == List(BbinUsing("power.arch1", "2.0.0")))
+      val socRef = RawTypeRef.Simple(RawTypeName("SoC"), Nil)
+      assert(bbin.imports == List(BbinImport(List(BbinImportItem("base", Some("g"), Some(BbinType.Partial(socRef)))), "golden.bbin")))
+      val lets = bbin.statements.collect { case BbinStmt.LetStmt(l) => l.name }
+      assert(lets.contains("derates"), s"expected a derates set let, got $lets")
+      val withs = bbin.statements.collect { case BbinStmt.WithStmt(w) => w }
+      assert(withs.size == 1, s"expected one with block, got ${bbin.statements}")
+      val targets = withs.head.body.collect { case BbinStmt.AssignStmt(a) => a.target }
+      assert(targets.exists(_.segments == List(BbinPathSeg.Field("g"), BbinPathSeg.Field("scalars"), BbinPathSeg.Field("perfAdj"))))
+      assert(
+        bbin.statements.exists {
+          case BbinStmt.ForStmt(f) =>
+            f.set == BbinExpr.Ident("derates") &&
+              f.body.exists {
+                case BbinStmt.LetStmt(l) if l.name == "sealed" =>
+                  l.expr == BbinExpr.Chain(BbinExpr.Ident("point"), List(BbinChainOp.Seal))
+                case _ => false
+              }
+          case _ => false
+        },
+        "expected `for ((idx, row) in derates)` sealing `point.seal()`",
+      )
+    }
+
   }
 }
